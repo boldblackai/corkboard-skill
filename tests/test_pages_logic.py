@@ -259,6 +259,81 @@ def test_insert_unknown_mode():
 
 
 # ---------------------------------------------------------------------------
+# is_page_not_found_error tests (Bug A — 404 → create path)
+# ---------------------------------------------------------------------------
+
+def test_is_page_not_found_404():
+    """CorkboardError with status 404 is a page-not-found."""
+    from cb_pages import is_page_not_found_error
+    from cb_client import CorkboardError
+    err = CorkboardError("Not Found", status=404, body=b"")
+    _check(is_page_not_found_error(err) is True, "404 should be page-not-found")
+
+
+def test_is_page_not_found_other_status():
+    """CorkboardError with status 500 is NOT a page-not-found."""
+    from cb_pages import is_page_not_found_error
+    from cb_client import CorkboardError
+    for status in (400, 403, 500, 503):
+        err = CorkboardError("Error", status=status, body=b"")
+        _check(is_page_not_found_error(err) is False,
+               f"status {status} should NOT be page-not-found")
+
+
+def test_is_page_not_found_other_exception():
+    """Non-CorkboardError exceptions are not page-not-found."""
+    from cb_pages import is_page_not_found_error
+    _check(is_page_not_found_error(ValueError("oops")) is False,
+           "ValueError should not be page-not-found")
+    _check(is_page_not_found_error(Exception("generic")) is False,
+           "Exception should not be page-not-found")
+
+
+# ---------------------------------------------------------------------------
+# build_find_params tests (Bug D — pattern/flags → q/regex/ignore_case)
+# ---------------------------------------------------------------------------
+
+def test_build_find_params_literal():
+    """Literal search sends q=pattern only."""
+    from cb_pages import build_find_params
+    params = build_find_params("hello")
+    _check(params == {"q": "hello"},
+           f"literal: expected {{'q': 'hello'}}, got {params}")
+
+
+def test_build_find_params_regex():
+    """Regex search adds regex=true."""
+    from cb_pages import build_find_params
+    params = build_find_params("[Bb]anana", extended=True)
+    _check(params == {"q": "[Bb]anana", "regex": "true"},
+           f"regex: expected regex=true, got {params}")
+
+
+def test_build_find_params_ignore_case():
+    """Case-insensitive search adds ignore_case=true."""
+    from cb_pages import build_find_params
+    params = build_find_params("apple", ignore_case=True)
+    _check(params == {"q": "apple", "ignore_case": "true"},
+           f"ignore_case: expected ignore_case=true, got {params}")
+
+
+def test_build_find_params_both_flags():
+    """Both -E and -i produce both flags."""
+    from cb_pages import build_find_params
+    params = build_find_params("pattern", extended=True, ignore_case=True)
+    _check(params == {"q": "pattern", "regex": "true", "ignore_case": "true"},
+           f"both flags: expected all three keys, got {params}")
+
+
+def test_build_find_params_no_flags():
+    """Neither flag produces only q."""
+    from cb_pages import build_find_params
+    params = build_find_params("test", extended=False, ignore_case=False)
+    _check(params == {"q": "test"},
+           f"no flags: expected only q, got {params}")
+
+
+# ---------------------------------------------------------------------------
 # should_retry_cas tests
 # ---------------------------------------------------------------------------
 

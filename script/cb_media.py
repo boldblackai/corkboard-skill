@@ -60,6 +60,8 @@ def cmd_media_upload(client, args):
     The working form is raw-binary for the v1 API; base64 is a fallback
     for older gateways.
     """
+    from cb_client import CorkboardError
+
     filepath = args.file
     if not os.path.isfile(filepath):
         print(f"error: file not found: {filepath}", file=sys.stderr)
@@ -73,44 +75,30 @@ def cmd_media_upload(client, args):
 
     # Attempt 1: raw binary PUT
     try:
-        status, _body = client.request(
+        client.request(
             "PUT",
-            f"/api/v1/media/{mid}",
+            f"media/{mid}",
             data=raw_bytes,
             headers={"Content-Type": content_type},
         )
-        if status < 400:
-            print(mid)
-            return
-        if status not in (400, 415, 422):
-            # Not a content-type rejection — raise
-            from types import SimpleNamespace
-            err = SimpleNamespace(status=status, body=_body)
-            _handle_http_error(err)
-    except Exception as e:
-        if hasattr(e, "status"):
-            if e.status not in (400, 415, 422):
-                _handle_http_error(e)
+        print(mid)
+        return
+    except CorkboardError as e:
+        if e.status in (400, 415, 422):
+            pass  # fall through to base64 attempt
         else:
-            raise
+            _handle_http_error(e)
 
     # Attempt 2: base64 JSON fallback
     b64 = base64.b64encode(raw_bytes).decode("ascii")
     try:
-        status, _body = client.request(
+        client.request(
             "PUT",
-            f"/api/v1/media/{mid}",
+            f"media/{mid}",
             json_body={"content_b64": b64},
         )
-    except Exception as e:
-        if hasattr(e, "status"):
-            _handle_http_error(e)
-        raise
-
-    if status >= 400:
-        from types import SimpleNamespace
-        err = SimpleNamespace(status=status, body=_body)
-        _handle_http_error(err)
+    except CorkboardError as e:
+        _handle_http_error(e)
 
     print(mid)
 
@@ -120,17 +108,12 @@ def cmd_media_get(client, args):
 
     Writes bytes to ``args.out`` (or stdout if ``-`` / not given).
     """
-    try:
-        status, data = client.request("GET", f"/api/v1/media/{args.id}")
-    except Exception as e:
-        if hasattr(e, "status"):
-            _handle_http_error(e)
-        raise
+    from cb_client import CorkboardError
 
-    if status >= 400:
-        from types import SimpleNamespace
-        err = SimpleNamespace(status=status, body=data)
-        _handle_http_error(err)
+    try:
+        data = client.request("GET", f"media/{args.id}")
+    except CorkboardError as e:
+        _handle_http_error(e)
 
     if args.out and args.out != "-":
         with open(args.out, "wb") as f:
@@ -145,7 +128,7 @@ def cmd_media_list(client, args):
     if args.ns:
         params["ns"] = args.ns
     try:
-        data = client.get("/api/v1/media", **params)
+        data = client.get("media", params=params)
     except Exception as e:
         if hasattr(e, "status"):
             _handle_http_error(e)
@@ -160,38 +143,28 @@ def cmd_media_list(client, args):
 
 def cmd_media_delete(client, args):
     """Delete a media file."""
-    try:
-        status, _body = client.request("DELETE", f"/api/v1/media/{args.id}")
-    except Exception as e:
-        if hasattr(e, "status"):
-            _handle_http_error(e)
-        raise
+    from cb_client import CorkboardError
 
-    if status >= 400:
-        from types import SimpleNamespace
-        err = SimpleNamespace(status=status, body=_body)
-        _handle_http_error(err)
+    try:
+        client.request("DELETE", f"media/{args.id}")
+    except CorkboardError as e:
+        _handle_http_error(e)
 
     print(f"deleted {args.id}")
 
 
 def cmd_media_move(client, args):
     """Move/rename a media file."""
-    try:
-        status, _body = client.request(
-            "POST",
-            f"/api/v1/media/{args.src}/move",
-            json_body={"destination": args.dst},
-        )
-    except Exception as e:
-        if hasattr(e, "status"):
-            _handle_http_error(e)
-        raise
+    from cb_client import CorkboardError
 
-    if status >= 400:
-        from types import SimpleNamespace
-        err = SimpleNamespace(status=status, body=_body)
-        _handle_http_error(err)
+    try:
+        client.request(
+            "POST",
+            f"media/{args.src}/move",
+            json_body={"to": args.dst, "rewrite": True},
+        )
+    except CorkboardError as e:
+        _handle_http_error(e)
 
     print(f"moved {args.src} → {args.dst}")
 
@@ -199,7 +172,7 @@ def cmd_media_move(client, args):
 def cmd_media_orphans(client, args):
     """List unreferenced media files."""
     try:
-        data = client.get("/api/v1/media", filter="orphans")
+        data = client.get("media", params={"filter": "orphans"})
     except Exception as e:
         if hasattr(e, "status"):
             _handle_http_error(e)
@@ -215,7 +188,7 @@ def cmd_media_orphans(client, args):
 def cmd_media_usage(client, args):
     """Show which pages reference a media file."""
     try:
-        data = client.get(f"/api/v1/media/{args.id}/usage")
+        data = client.get(f"media/{args.id}/usage")
     except Exception as e:
         if hasattr(e, "status"):
             _handle_http_error(e)
