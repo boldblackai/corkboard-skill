@@ -155,6 +155,29 @@ def should_retry_cas(status_code, attempt_count):
     return status_code == 412 and attempt_count == 1
 
 
+def is_page_not_found_error(exc):
+    """Return True if the exception is a 404 page-not-found.
+
+    Used by cmd_put to decide whether to proceed with revision=None
+    (create a new page) when the page does not exist yet.
+    """
+    return isinstance(exc, CorkboardError) and exc.status == 404
+
+
+def build_find_params(pattern, extended=False, ignore_case=False):
+    """Build query params for the page find endpoint.
+
+    Maps the CLI flags (-E / -i) to the server contract:
+    ``q`` (required, string), ``regex`` (boolean), ``ignore_case`` (boolean).
+    """
+    params = {"q": pattern}
+    if extended:
+        params["regex"] = "true"
+    if ignore_case:
+        params["ignore_case"] = "true"
+    return params
+
+
 # ======================================================================
 # Helpers shared by command implementations
 # ======================================================================
@@ -194,10 +217,17 @@ def cmd_put(client, args):
     """Create or replace a page.
 
     Fetches the current revision first (for CAS), then PUTs the new body.
+    If the page does not exist (404), proceeds with revision=None to create.
     """
     body = _read_input(args)
-    page = client.get_page(args.page)
-    revision = page.get("revision") or page.get("body_revision")
+    try:
+        page = client.get_page(args.page)
+        revision = page.get("revision") or page.get("body_revision")
+    except CorkboardError as e:
+        if is_page_not_found_error(e):
+            revision = None
+        else:
+            raise
     result = client.put_cas(args.page, body, revision=revision)
     _print_json(result)
 
@@ -277,9 +307,9 @@ def cmd_insert(client, args):
 
 def cmd_find(client, args):
     """Search for a pattern in a page's body."""
-    params = {"pattern": args.pattern}
-    if hasattr(args, "extended") and args.extended:
-        params["flags"] = "i"  # case-insensitive if -i flag is set
+    extended = bool(getattr(args, "extended", False))
+    ignore_case = bool(getattr(args, "i", False))
+    params = build_find_params(args.pattern, extended=extended, ignore_case=ignore_case)
     result = client.get(f"pages/{args.page}/find", params=params)
     _print_json(result)
 
@@ -287,8 +317,8 @@ def cmd_find(client, args):
 def cmd_move(client, args):
     """Move/rename a page."""
     result = client.post(
-        f"pages/{args.page}/move",
-        data={"destination": args.dst},
+        f"pages/{args.src}/move",
+        data={"to": args.dst, "rewrite": True},
     )
     _print_json(result)
 

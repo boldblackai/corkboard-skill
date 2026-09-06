@@ -194,7 +194,7 @@ def cmd_list(client, args):
     """List pages in a namespace."""
     params = build_query_params(ns=args.ns, depth=args.depth)
     try:
-        data = client.get("/api/v1/pages", **params)
+        data = client.get("pages", params=params)
     except Exception as e:
         if hasattr(e, "status"):
             _handle_http_error(e)
@@ -224,7 +224,7 @@ def cmd_search(client, args):
     if args.ns:
         params["ns"] = args.ns
     try:
-        data = client.get("/api/v1/pages", **params)
+        data = client.get("pages", params=params)
     except Exception as e:
         if hasattr(e, "status"):
             _handle_http_error(e)
@@ -239,9 +239,10 @@ def cmd_search(client, args):
 def cmd_sitemap(client, args):
     """Render an ASCII sitemap tree."""
     params = build_query_params(ns=args.ns, depth=args.depth)
+    params["view"] = "tree"
     try:
         # Use the tree view; if the API returns a flat list, build the tree
-        tree_data = client.get("/api/v1/pages", view="tree", **params)
+        tree_data = client.get("pages", params=params)
     except Exception as e:
         if hasattr(e, "status"):
             _handle_http_error(e)
@@ -265,7 +266,7 @@ def cmd_sitemap(client, args):
 def cmd_wanted(client, args):
     """List pages with broken internal links."""
     try:
-        data = client.get("/api/v1/pages", filter="wanted")
+        data = client.get("pages", params={"filter": "wanted"})
     except Exception as e:
         if hasattr(e, "status"):
             _handle_http_error(e)
@@ -280,7 +281,7 @@ def cmd_wanted(client, args):
 def cmd_orphans(client, args):
     """List pages with no inbound links."""
     try:
-        data = client.get("/api/v1/pages", filter="orphans")
+        data = client.get("pages", params={"filter": "orphans"})
     except Exception as e:
         if hasattr(e, "status"):
             _handle_http_error(e)
@@ -295,7 +296,7 @@ def cmd_orphans(client, args):
 def cmd_semantic(client, args):
     """Semantic (vector) search."""
     try:
-        data = client.get("/api/v1/pages/semantic", q=args.query)
+        data = client.get("pages/semantic", params={"q": args.query})
     except Exception as e:
         status = getattr(e, "status", None)
         body = getattr(e, "body", None)
