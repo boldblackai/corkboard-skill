@@ -95,7 +95,7 @@ def cmd_media_upload(client, args):
         client.request(
             "PUT",
             f"media/{mid}",
-            json_body={"content_b64": b64},
+            data={"content_b64": b64},
         )
     except CorkboardError as e:
         _handle_http_error(e)
@@ -161,7 +161,7 @@ def cmd_media_move(client, args):
         client.request(
             "POST",
             f"media/{args.src}/move",
-            json_body={"to": args.dst, "rewrite": True},
+            data={"to": args.dst, "rewrite": True},
         )
     except CorkboardError as e:
         _handle_http_error(e)

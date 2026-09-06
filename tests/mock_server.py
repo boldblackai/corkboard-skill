@@ -132,10 +132,10 @@ class MockHandler(BaseHTTPRequestHandler):
             return self._send_json(_service_root)
 
         # Media sub-routes first (they share /media prefix with pages)
-        m = re.match(r"^/media/([^/]+)/usage$", p)
+        m = re.match(r"^/media/(.+)/usage$", p)
         if m:
             return self._handle_media_usage(m.group(1))
-        m = re.match(r"^/media/([^/]+)$", p)
+        m = re.match(r"^/media/(.+)$", p)
         if m:
             return self._handle_media_get(m.group(1))
         if p == "/media":
@@ -201,7 +201,7 @@ class MockHandler(BaseHTTPRequestHandler):
         m = re.match(r"^/pages/([^/]+)/move$", p)
         if m:
             return self._handle_move(m.group(1))
-        m = re.match(r"^/media/([^/]+)/move$", p)
+        m = re.match(r"^/media/(.+)/move$", p)
         if m:
             return self._handle_media_move(m.group(1))
 
@@ -217,7 +217,7 @@ class MockHandler(BaseHTTPRequestHandler):
         m = re.match(r"^/pages/([^/]+)$", p)
         if m:
             return self._handle_delete_page(m.group(1))
-        m = re.match(r"^/media/([^/]+)$", p)
+        m = re.match(r"^/media/(.+)$", p)
         if m:
             return self._handle_media_delete(m.group(1))
 
@@ -278,7 +278,7 @@ class MockHandler(BaseHTTPRequestHandler):
 
     def _handle_move(self, page_id):
         data = self._get_json_body()
-        dst = data.get("destination", "")
+        dst = data.get("to", "")
         if page_id not in _pages:
             return self._send_error(404, "Source page not found")
         page = _pages.pop(page_id)
@@ -291,7 +291,7 @@ class MockHandler(BaseHTTPRequestHandler):
     def _handle_find(self, page_id, qs):
         if page_id not in _pages:
             return self._send_error(404, "Page not found")
-        pattern = qs.get("pattern", [""])[0]
+        pattern = qs.get("q", [""])[0]
         body = _pages[page_id]["body"]
         matches = []
         for i, line in enumerate(body.split("\n"), 1):
@@ -417,7 +417,7 @@ class MockHandler(BaseHTTPRequestHandler):
 
     def _handle_media_move(self, media_id):
         data = self._get_json_body()
-        dst = data.get("destination", "")
+        dst = data.get("to", "")
         if media_id not in _media:
             return self._send_error(404, "Media not found")
         _media[dst] = _media.pop(media_id)

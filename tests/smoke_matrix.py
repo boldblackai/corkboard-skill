@@ -90,6 +90,45 @@ def _run_expect_fail(cmd, expect_contains=None):
     _run(cmd, expected_exit=1, expect_contains=expect_contains)
 
 
+def _run_media_get_roundtrip(media_id, out_path, expected_bytes):
+    """Run media-get and assert the downloaded bytes match the uploaded bytes."""
+    global _ran, _failures
+
+    _ran += 1
+
+    env = os.environ.copy()
+    env["CORKBOARD_URL"] = MOCK_URL
+    env["CORKBOARD_TOKEN"] = "test-token"
+
+    full_cmd = ["python3", ENTRYPOINT, "media-get", media_id, "-o", out_path]
+    result = subprocess.run(full_cmd, capture_output=True, text=True, env=env, timeout=15)
+    combined = result.stdout + result.stderr
+
+    ok = result.returncode == 0
+    if ok:
+        try:
+            with open(out_path, "rb") as f:
+                got = f.read()
+            if got != expected_bytes:
+                ok = False
+                print(f"{RED}FAIL [{_ran}]{RESET} {' '.join(full_cmd)}")
+                print(f"  byte round-trip mismatch: expected {len(expected_bytes)} bytes, got {len(got)}")
+        except OSError as e:
+            ok = False
+            print(f"{RED}FAIL [{_ran}]{RESET} {' '.join(full_cmd)}")
+            print(f"  could not read output file: {e}")
+    else:
+        print(f"{RED}FAIL [{_ran}]{RESET} {' '.join(full_cmd)}")
+        print(f"  expected exit 0, got {result.returncode}")
+        print(f"  combined: {combined[:300]}")
+
+    if ok:
+        print(f"{GREEN}  ok [{_ran}]{RESET} media-get {media_id} (byte round-trip)")
+    else:
+        _failures += 1
+    return ok
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -150,16 +189,15 @@ def main():
 
     _run(["find", "start", "Welcome"], expect_contains='"count"')
 
-    # move — SKIP: upstream S1 bug (cmd_move uses args.page, argparse registers src/dst)
     _run(["move", "sandbox", "playground", "--sum", "rename"],
-         skip_reason="S1 bug: cmd_move: args.page vs args.src/dst mismatch")
+         expect_contains='"id": "playground"')
 
     _run(["links", "start"], expect_contains="sandbox")
     _run(["backlinks", "start"], expect_contains="start")
     _run(["revisions", "start"], expect_contains='"revisions"')
     _run(["revision-show", "start", "1"], expect_contains='"revision"')
 
-    _run(["delete", "sandbox", "--sum", "cleanup"],
+    _run(["delete", "playground", "--sum", "cleanup"],
          expect_contains='"deleted"')
 
     # ==================================================================
@@ -172,19 +210,13 @@ def main():
 
     _run(["list"], expect_contains="start")
 
-    _run(["list", "--ns", "root"],
-         skip_reason="S2 bug: client.get() kwarg interface mismatch")
-    _run(["search", "Welcome"],
-         skip_reason="S2 bug: client.get() kwarg interface mismatch")
-    _run(["sitemap"],
-         skip_reason="S2 bug: client.get() kwarg interface mismatch")
+    _run(["list", "--ns", "root"])
+    _run(["search", "Welcome"], expect_contains="start")
+    _run(["sitemap"], expect_contains="start")
 
-    _run(["wanted"],
-         skip_reason="S2 bug: client.get() kwarg interface mismatch")
-    _run(["orphans"],
-         skip_reason="S2 bug: client.get() kwarg interface mismatch")
-    _run(["semantic", "test"],
-         skip_reason="S2 bug: client.get() kwarg interface mismatch")
+    _run(["wanted"], expect_contains="missing-page")
+    _run(["orphans"], expect_contains="sandbox")
+    _run(["semantic", "test"], expect_contains="semantic search unavailable")
 
     # ==================================================================
     # Media — S2 module (cb_media.py)
@@ -194,21 +226,28 @@ def main():
 
     print("\n--- Media (S2: cb_media.py) ---")
 
-    _run(["media-upload", "/dev/null", "test", "hello.txt"],
-         skip_reason="S2 bug: client.request() return type mismatch (tuple vs JSON)")
+    # Upload a file with known binary content to prove byte round-trip.
+    roundtrip_bytes = b"corkboard media round-trip\x00\x01\x02\xff\n"
+    fd, upload_path = tempfile.mkstemp(suffix=".bin")
+    with os.fdopen(fd, "wb") as f:
+        f.write(roundtrip_bytes)
+
+    _run(["media-upload", upload_path, "test", "hello.txt"],
+         expect_contains="test/hello.txt")
     _run(["media-list"])
-    _run(["media-list", "--ns", "test"],
-         skip_reason="S2 bug: client.get() kwarg interface mismatch")
-    _run(["media-get", "test/hello.txt", "-o", "/tmp/smoke-out.txt"],
-         skip_reason="S2 bug: cascades from upload failure")
-    _run(["media-usage", "test/hello.txt"],
-         skip_reason="S2 bug: cascades from upload failure")
+    _run(["media-list", "--ns", "test"], expect_contains="test/hello.txt")
+
+    out_dir = tempfile.mkdtemp()
+    out_path = os.path.join(out_dir, "roundtrip.out")
+    _run_media_get_roundtrip("test/hello.txt", out_path, roundtrip_bytes)
+
+    _run(["media-usage", "test/hello.txt"], expect_contains="start")
     _run(["media-move", "test/hello.txt", "test/renamed.txt"],
-         skip_reason="S2 bug: cascades from upload failure")
-    _run(["media-orphans"],
-         skip_reason="S2 bug: client.get() kwarg interface mismatch")
-    _run(["media-delete", "test/hello.txt"],
-         skip_reason="S2 bug: cascades from upload failure")
+         expect_contains="moved")
+    _run(["media-orphans"])
+    _run(["media-delete", "test/renamed.txt"], expect_contains="deleted")
+
+    os.unlink(upload_path)
 
     # ==================================================================
     # Summary
