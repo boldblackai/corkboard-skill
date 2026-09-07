@@ -17,6 +17,8 @@ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_THIS_DIR)
 sys.path.insert(0, os.path.join(_PROJECT_ROOT, "script"))
 
+from cb_client import CorkboardClient, CorkboardError
+
 # ---------------------------------------------------------------------------
 # Test framework (stdlib-only, no pytest)
 # ---------------------------------------------------------------------------
@@ -334,34 +336,162 @@ def test_build_find_params_no_flags():
 
 
 # ---------------------------------------------------------------------------
-# should_retry_cas tests
+# build_body_payload tests (G6 — --sum wiring)
 # ---------------------------------------------------------------------------
 
-def test_cas_retry_on_412_first_attempt():
-    """On HTTP 412 and first attempt, should retry."""
-    from cb_pages import should_retry_cas
-    _check(should_retry_cas(412, 1) is True, "first 412 should retry")
+def test_build_body_payload_without_summary():
+    """No summary → payload has body only."""
+    from cb_client import build_body_payload
+    payload = build_body_payload("hello")
+    _check(payload == {"body": "hello"},
+           f"expected body-only payload, got {payload}")
 
 
-def test_cas_retry_on_412_second_attempt():
-    """On HTTP 412 and second attempt, should NOT retry."""
-    from cb_pages import should_retry_cas
-    _check(should_retry_cas(412, 2) is False, "second 412 should not retry")
+def test_build_body_payload_with_summary():
+    """With summary → payload includes summary."""
+    from cb_client import build_body_payload
+    payload = build_body_payload("hello", "edit summary here")
+    _check(payload == {"body": "hello", "summary": "edit summary here"},
+           f"expected body+summary payload, got {payload}")
 
 
-def test_cas_no_retry_on_other_status():
-    """Non-412 status codes should never retry."""
-    from cb_pages import should_retry_cas
-    for status in (200, 400, 404, 500, 503):
-        _check(should_retry_cas(status, 1) is False,
-               f"status {status} should not trigger retry")
+def test_build_body_payload_empty_summary_is_kept():
+    """An explicitly empty summary is still sent (distinct from None)."""
+    from cb_client import build_body_payload
+    payload = build_body_payload("hello", "")
+    _check(payload == {"body": "hello", "summary": ""},
+           f"expected empty summary kept, got {payload}")
 
 
-def test_cas_no_retry_garbage_attempt():
-    """Attempt count > 2 should not retry."""
-    from cb_pages import should_retry_cas
-    _check(should_retry_cas(412, 3) is False, "attempt 3+ should not retry")
-    _check(should_retry_cas(412, 0) is False, "attempt 0 should not retry")
+# ---------------------------------------------------------------------------
+# CAS retry (put_cas mutate-callback) tests — G7
+# ---------------------------------------------------------------------------
+
+class _ScriptedClient(CorkboardClient):
+    """CorkboardClient with scriptable get_page/request for CAS unit tests.
+
+    ``_gets`` queues the page dicts returned by successive get_page calls.
+    ``_put_results`` queues the result (dict or CorkboardError) returned by
+    each PUT request.  ``puts`` records every (payload, headers) sent.
+    """
+
+    def __init__(self):
+        super().__init__(base_url="http://test.local", token="test-token")
+        self._gets = []
+        self._put_results = []
+        self.puts = []
+
+    def get_page(self, page_id):
+        return self._gets.pop(0)
+
+    def request(self, method, path, data=None, headers=None, params=None, raw=False):
+        if method != "PUT":
+            raise AssertionError(f"unexpected request {method} {path}")
+        self.puts.append((data, headers))
+        result = self._put_results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+def test_cas_retry_derives_from_fresh_body():
+    """On 412, the mutation is re-applied to the FRESH body, not the stale one."""
+    from cb_pages import apply_edits
+
+    client = _ScriptedClient()
+    # edit-style mutation: append a marker to whatever body it receives.
+    def mutate(fresh_body):
+        return fresh_body + " [edited]"
+
+    # Attempt 1 (callable): put_cas fetches the page, applies mutate, PUTs.
+    client._gets.append({"body": "v1", "revision": 1})
+    client._put_results.append(
+        CorkboardError("Precondition failed", status=412, body=b"")
+    )
+    # Retry: re-fetch shows a concurrent writer's body (revision bumped).
+    client._gets.append({"body": "v1 CONCURRENT", "revision": 2})
+    client._put_results.append(
+        {"body": "v1 CONCURRENT [edited]", "revision": 2}
+    )
+
+    result = client.put_cas("p", mutate)
+
+    _check(len(client.puts) == 2, f"expected 2 PUTs, got {len(client.puts)}")
+    # First PUT: mutation applied to the initially-fetched body.
+    _check(client.puts[0][0] == {"body": "v1 [edited]"},
+           f"first PUT payload wrong: {client.puts[0][0]}")
+    _check(client.puts[0][1] == {"If-Match": '"1"'},
+           f"first PUT headers wrong: {client.puts[0][1]}")
+    # Retry PUT: mutation applied to the FRESH body — concurrent text preserved.
+    _check(client.puts[1][0] == {"body": "v1 CONCURRENT [edited]"},
+           f"retry PUT payload wrong (concurrent text lost?): {client.puts[1][0]}")
+    _check(client.puts[1][1] == {"If-Match": '"2"'},
+           f"retry PUT headers wrong: {client.puts[1][1]}")
+    _check("CONCURRENT" in result["body"],
+           "concurrent writer's text missing from final result")
+
+
+def test_cas_conflict_reachable_on_second_412():
+    """A second 412 raises the typed CONFLICT error (previously dead code)."""
+    client = _ScriptedClient()
+    # Replacement string: no get_page on attempt 1.
+    client._put_results.append(
+        CorkboardError("Precondition failed", status=412, body=b"")
+    )
+    # Retry re-fetches, then PUTs again.
+    client._gets.append({"body": "v1b", "revision": 2})
+    client._put_results.append(
+        CorkboardError("Precondition failed", status=412, body=b"")
+    )
+
+    err = _raises(CorkboardError, client.put_cas, "p", "replacement body", revision=1)
+
+    _check(err is not None, "second 412 did not raise CorkboardError")
+    _check(err.status == 412, f"expected status 412, got {err.status}")
+    _check("CONFLICT" in str(err), f"expected CONFLICT message, got: {err}")
+    _check(len(client.puts) == 2, f"expected 2 PUTs, got {len(client.puts)}")
+    _check(client.puts[0][1] == {"If-Match": '"1"'},
+           f"first PUT headers wrong: {client.puts[0][1]}")
+    _check(client.puts[1][1] == {"If-Match": '"2"'},
+           f"retry PUT headers wrong: {client.puts[1][1]}")
+
+
+def test_cas_replacement_resent_unchanged_on_retry():
+    """For a replacement string, the 412 retry re-sends the SAME body."""
+    client = _ScriptedClient()
+    client._put_results.append(
+        CorkboardError("Precondition failed", status=412, body=b"")
+    )
+    client._gets.append({"body": "concurrent", "revision": 2})
+    client._put_results.append({"body": "replacement body", "revision": 2})
+
+    result = client.put_cas("p", "replacement body", revision=1)
+
+    _check(len(client.puts) == 2, f"expected 2 PUTs, got {len(client.puts)}")
+    _check(client.puts[0][0] == {"body": "replacement body"},
+           f"first PUT payload wrong: {client.puts[0][0]}")
+    _check(client.puts[1][0] == {"body": "replacement body"},
+           f"retry PUT should re-send same body: {client.puts[1][0]}")
+    _check(result == {"body": "replacement body", "revision": 2},
+           f"unexpected result: {result}")
+
+
+def test_cas_mutation_summary_forwarded():
+    """The summary is included on the initial PUT and the 412 retry."""
+    client = _ScriptedClient()
+    client._gets.append({"body": "v1", "revision": 1})
+    client._put_results.append(
+        CorkboardError("Precondition failed", status=412, body=b"")
+    )
+    client._gets.append({"body": "v1 concurrent", "revision": 2})
+    client._put_results.append({"body": "v1 concurrent!", "revision": 2})
+
+    client.put_cas("p", lambda fresh: fresh + "!", summary="my summary")
+
+    _check(client.puts[0][0] == {"body": "v1!", "summary": "my summary"},
+           f"first PUT payload wrong: {client.puts[0][0]}")
+    _check(client.puts[1][0] == {"body": "v1 concurrent!", "summary": "my summary"},
+           f"retry PUT payload wrong: {client.puts[1][0]}")
 
 
 # ---------------------------------------------------------------------------

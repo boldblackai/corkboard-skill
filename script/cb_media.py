@@ -106,20 +106,28 @@ def cmd_media_upload(client, args):
 def cmd_media_get(client, args):
     """Download a media file.
 
-    Writes bytes to ``args.out`` (or stdout if ``-`` / not given).
+    Sends ``Accept: application/octet-stream`` so the server returns raw
+    bytes (the endpoint content-negotiates: JSON Accept → metadata dict,
+    otherwise the stored bytes).  Writes the raw bytes to ``args.out`` (or
+    stdout if ``-`` / not given).
     """
     from cb_client import CorkboardError
 
     try:
-        data = client.request("GET", f"media/{args.id}")
+        data = client.request(
+            "GET",
+            f"media/{args.id}",
+            headers={"Accept": "application/octet-stream"},
+            raw=True,
+        )
     except CorkboardError as e:
         _handle_http_error(e)
 
     if args.out and args.out != "-":
         with open(args.out, "wb") as f:
-            f.write(data if isinstance(data, bytes) else str(data).encode())
+            f.write(data)
     else:
-        sys.stdout.buffer.write(data if isinstance(data, bytes) else str(data).encode())
+        sys.stdout.buffer.write(data)
 
 
 def cmd_media_list(client, args):
@@ -213,14 +221,12 @@ def register_media(subparsers, client_factory):
     of ``client_factory()``.
     """
 
-    # media-upload <file> <ns> <name> [--no-overwrite]
+    # media-upload <file> <ns> <name>
     p_upload = subparsers.add_parser("media-upload",
                                      help="Upload a media file")
     p_upload.add_argument("file", help="Path to the file to upload")
     p_upload.add_argument("ns", help="Target namespace")
     p_upload.add_argument("name", help="Media name (leaf)")
-    p_upload.add_argument("--no-overwrite", action="store_true",
-                          help="Fail if the media id already exists")
     p_upload.set_defaults(func=lambda args: cmd_media_upload(client_factory(), args))
 
     # media-get <id> [-o OUT]

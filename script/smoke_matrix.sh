@@ -13,6 +13,10 @@ NS="smoke"
 printf "%-40s | %4s | %s\n" "command" "exit" "key-output"
 printf "%-40s-+-%4s-+-%s\n" "----------------------------------------" "----" "--------------------------------------------------"
 
+# 429 pacing: the API throttles at 60 req/min (per token). Space requests out.
+: "${PACE:=1.5}"
+pace() { sleep "$PACE"; }
+
 # run: execute command, print table row, return exit code implicitly
 row() {
     local label="$1"; shift
@@ -24,6 +28,7 @@ row() {
     local snippet="${out%%$'\n'*}"
     snippet="${snippet:0:80}"
     printf "%-40s | %4s | %s\n" "$label" "$rc" "$snippet"
+    pace
 }
 
 # raw: capture full output without printing a table row
@@ -34,6 +39,7 @@ raw() {
     rc=$?
     set -e
     echo "$out"
+    pace
     return $rc
 }
 
@@ -65,20 +71,50 @@ row "get (after replace)" $CLI get "$PAGE"
 check "  replace check" "body contains 'hello world v2': $R2"
 
 # ------------------------------------------------------------------
-# 3. CAS conflict
+# 3. CAS conflict (G7): concurrent write preserved through an edit
 # ------------------------------------------------------------------
-# Get current revision
-REV=$(echo "$BODY2" | python3 -c "import sys,json; print(json.load(sys.stdin).get('revision',''))" 2>/dev/null || echo "")
-STALE_REV="00000000-0000-0000-0000-000000000000"
-curl -s -X PUT "$CORKBOARD_URL/api/v1/pages/$PAGE" \
+PAGE_CAS="$NS/smoke-cas"
+row "put (setup cas)" $CLI put "$PAGE_CAS" --text "alpha
+beta
+gamma"
+
+# Concurrent writer bypasses the CLI and bumps the revision + changes the body.
+curl -s -X PUT "$CORKBOARD_URL/api/v1/pages/$PAGE_CAS" \
     -H "Authorization: Bearer $CORKBOARD_TOKEN" \
     -H "Content-Type: application/json" \
-    -H "If-Match: \"$STALE_REV\"" \
-    -d '{"body":"stale write attempt"}' > /dev/null 2>&1 || true
-row "put CAS (stale then retry)" $CLI put "$PAGE" --text "cas final content"
-FINAL=$(raw $CLI get "$PAGE") || true
-echo "$FINAL" | grep -q "cas final content" && CAS_R="OK" || CAS_R="FAIL"
-check "  CAS final content" "CAS resolved: $CAS_R"
+    -d '{"body":"alpha\nCONCURRENT\nbeta\ngamma"}' > /dev/null
+
+# CLI edit must re-fetch the concurrent body and preserve the writer's text.
+row "edit after concurrent write" $CLI edit "$PAGE_CAS" --old "beta" --new "BETA"
+CAS_BODY=$(raw $CLI get "$PAGE_CAS") || true
+echo "$CAS_BODY" | grep -q "CONCURRENT" && echo "$CAS_BODY" | grep -q "BETA" && CAS_OK="OK" || CAS_OK="FAIL"
+row "get (cas result)" $CLI get "$PAGE_CAS"
+check "  concurrent text preserved" "CONCURRENT + BETA present: $CAS_OK"
+
+# Deterministic 412: a stale revision forces the mutation re-apply path live.
+PAGE_CAS2="$NS/smoke-cas2"
+row "put (setup cas2)" $CLI put "$PAGE_CAS2" --text "orig text"
+CAS2_OUT=$(python3 - "$PAGE_CAS2" <<'PYEOF' 2>&1
+import os, sys
+sys.path.insert(0, "script")
+from cb_client import CorkboardClient, CorkboardError
+c = CorkboardClient()
+page_id = sys.argv[1]
+page = c.get_page(page_id)
+stale_rev = page["revision"]
+# A concurrent writer (raw PUT, no If-Match) bumps revision + body.
+c.request("PUT", f"pages/{page_id}", data={"body": "concurrent replacement"})
+def mutate(fresh):
+    return fresh + " [edited]"
+try:
+    r = c.put_cas(page_id, mutate, revision=stale_rev)
+    print("RETRY_OK:" + r["body"])
+except CorkboardError as e:
+    print("CONFLICT:" + str(e.status))
+PYEOF
+)
+echo "$CAS2_OUT" | grep -q "concurrent replacement \[edited\]" && CAS2_R="OK" || CAS2_R="FAIL"
+check "  412 re-apply (stale rev)" "mutate re-applied to fresh body: $CAS2_R ($CAS2_OUT)"
 
 # ------------------------------------------------------------------
 # 4. append
@@ -97,15 +133,15 @@ check "  append both parts" "contains both parts: $AP_OK"
 PAGE_EDIT="$NS/smoke-edit"
 row "put (setup edit)" $CLI put "$PAGE_EDIT" --text "line alpha
 line beta
-line alpha"
+line delta"
 
 row "edit --old/--new (happy)" $CLI edit "$PAGE_EDIT" --old "line alpha" --new "line gamma"
 EDIT_BODY=$(raw $CLI get "$PAGE_EDIT") || true
-echo "$EDIT_BODY" | grep -q "line gamma" && echo "$EDIT_BODY" | grep -q "line alpha" && ED_H="OK" || ED_H="FAIL"
-check "  edit happy path" "replaced one alpha with gamma: $ED_H"
+echo "$EDIT_BODY" | grep -q "line gamma" && ! echo "$EDIT_BODY" | grep -q "line alpha" && ED_H="OK" || ED_H="FAIL"
+check "  edit happy path" "alpha→gamma (alpha gone, gamma present): $ED_H"
 
 row "edit 0-match abort" $CLI edit "$PAGE_EDIT" --old "no such text anywhere" --new "replaced"
-row "edit 2-match abort" $CLI edit "$PAGE_EDIT" --old "line" --new "LINE"
+row "edit multi-match abort" $CLI edit "$PAGE_EDIT" --old "line" --new "LINE"
 
 # ------------------------------------------------------------------
 # 6. insert
@@ -116,14 +152,14 @@ content here
 # Section Two
 more content"
 
-row "insert --under" $CLI insert "$PAGE_INSERT" --under "Section One" --text "inserted text"
+row "insert --under" $CLI insert "$PAGE_INSERT" --under "# Section One" --text "inserted text"
 INS_BODY=$(raw $CLI get "$PAGE_INSERT") || true
 echo "$INS_BODY" | grep -q "inserted text" && INS_OK="OK" || INS_OK="FAIL"
 check "  insert under heading" "inserted text found: $INS_OK"
 
 row "insert --after" $CLI insert "$PAGE_INSERT" --after "content here" --text "after line"
 row "insert --before" $CLI insert "$PAGE_INSERT" --before "more content" --text "before line"
-row "insert anchor-miss" $CLI insert "$PAGE_INSERT" --under "No Such Heading" --text "nope"
+row "insert anchor-miss" $CLI insert "$PAGE_INSERT" --under "# No Such Heading" --text "nope"
 
 # ------------------------------------------------------------------
 # 7. find
@@ -188,8 +224,11 @@ row "search" $CLI search "hello"
 row "sitemap" $CLI sitemap --ns "$NS"
 
 WANTED_PAGE="$NS/smoke-wanted"
-row "put (wanted page)" $CLI put "$WANTED_PAGE" --text "Link to [[$NS/nonexistent-target]]"
+row "put (wanted page)" $CLI put "$WANTED_PAGE" --text "Link to [missing]($NS/nonexistent-target)"
+WANTED_OUT=$(raw $CLI wanted) || true
+echo "$WANTED_OUT" | grep -q "nonexistent-target" && WANTED_OK="OK" || WANTED_OK="FAIL"
 row "wanted" $CLI wanted
+check "  wanted detects broken link" "nonexistent-target listed: $WANTED_OK"
 
 ORPHAN_PAGE="$NS/smoke-orphan"
 row "put (orphan page)" $CLI put "$ORPHAN_PAGE" --text "nobody links to me"
@@ -223,15 +262,21 @@ row "media-list" $CLI media-list --ns "$NS"
 
 $CLI media-get "$MEDIA_ID" -o /tmp/smoke-test-dl.png > /dev/null 2>&1
 cmp -s /tmp/smoke-test.png /tmp/smoke-test-dl.png && MG="OK" || MG="FAIL"
-row "media-get" $CLI media-get "$MEDIA_ID"
-check "  media-get round-trip" "bytes match: $MG"
+check "  media-get byte round-trip" "cmp identical: $MG"
 
+# NOTE: media-usage calls GET /media/{id}/usage, but the server currently
+# shadows that route with GET /media/{id} (show) — the greedy {id} route is
+# registered first (routes/api.php media group). The CLI request is correct;
+# the 404 is a server-side route-ordering bug, out of this CLI's scope.
 row "media-usage" $CLI media-usage "$MEDIA_ID"
+check "  media-usage" "EXPECTED 404 (server route-shadowing bug, CLI correct)"
 row "media-orphans" $CLI media-orphans
 
 NEW_MEDIA="$NS/smoke-test-moved.png"
 row "media-move" $CLI media-move "$MEDIA_ID" "$NEW_MEDIA"
-row "media-get moved" $CLI media-get "$NEW_MEDIA"
+$CLI media-get "$NEW_MEDIA" -o /tmp/smoke-test-moved.png > /dev/null 2>&1
+cmp -s /tmp/smoke-test.png /tmp/smoke-test-moved.png && MMG="OK" || MMG="FAIL"
+check "  media-get moved bytes" "moved bytes identical: $MMG"
 
 row "media-delete" $CLI media-delete "$NEW_MEDIA"
 

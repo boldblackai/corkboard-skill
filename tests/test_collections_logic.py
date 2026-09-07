@@ -212,6 +212,15 @@ def test_handle_semantic_403():
         _check("403 exits with code 0", e.code == 0)
 
 
+def test_handle_semantic_402():
+    # Plan gate (Free org) returns 402 — must be tolerated the same way.
+    try:
+        handle_semantic_error(402, '{"error":"Semantic search requires a Pro plan or higher."}')
+        _check("402 does not raise", True)
+    except SystemExit as e:
+        _check("402 exits with code 0", e.code == 0)
+
+
 def test_handle_semantic_503():
     try:
         handle_semantic_error(503, "Service Unavailable")
@@ -269,6 +278,7 @@ if __name__ == '__main__':
     test_render_sitemap_mark_start()
     test_render_sitemap_empty()
     test_handle_semantic_403()
+    test_handle_semantic_402()
     test_handle_semantic_503()
     test_handle_semantic_connection_error()
     test_handle_semantic_other_http_error()
