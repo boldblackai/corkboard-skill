@@ -46,6 +46,31 @@ _pages["sandbox"] = {
 
 _service_root = {"service": "corkboard", "version": "0.1.0", "api_version": "v1", "status": "ok"}
 
+# ---------------------------------------------------------------------------
+# CAS conflict forcing — deterministic 412s for smoke-matrix testing.
+#
+# Each entry maps page_id -> {remaining: N, inject: bool}.
+# When a PUT with If-Match arrives for a page in this map and remaining
+# > 0, the mock sends a 412 and decrements remaining.  After delivering
+# the last forced 412, If-Match checks work normally.
+#
+# If ``inject`` is True, the mock also inserts a concurrent-writer
+# marker into the page body *after* the first 412, simulating a
+# real-world CAS conflict where another writer edits the page between
+# the client's fetch and its retry.
+# ---------------------------------------------------------------------------
+
+_CAS_CONFLICT_SPECS: dict[str, dict] = {}
+# Sentinel page IDs auto-registered with their conflict spec:
+_CAS_SENTINELS = {
+    "cas-retry-success":   {"remaining": 1, "inject": True},
+    "cas-double-conflict": {"remaining": 2, "inject": False},
+}
+for _pid, _spec in _CAS_SENTINELS.items():
+    _CAS_CONFLICT_SPECS[_pid] = dict(_spec)  # mutable copy per instance
+
+_CONCURRENT_MARKER = "CONCURRENT-ADDITION\n"
+
 
 # ---------------------------------------------------------------------------
 # Request handler
@@ -239,6 +264,21 @@ class MockHandler(BaseHTTPRequestHandler):
 
         existing = _pages.get(page_id)
         current_rev = existing["revision"] if existing else 0
+
+        # ── CAS conflict forcing (deterministic 412s for smoke tests) ──
+        if if_match and existing:
+            spec = _CAS_CONFLICT_SPECS.get(page_id)
+            if spec and spec["remaining"] > 0:
+                spec["remaining"] -= 1
+                if spec.get("inject") and spec["remaining"] == 0:
+                    # After the last forced 412, pretend a concurrent
+                    # writer modified the page so the CLI's re-fetch
+                    # sees unexpected text.
+                    existing["body"] = _CONCURRENT_MARKER + existing["body"]
+                    existing["revision"] += 1
+                    existing["body_revision"] += 1
+                return self._send_error(412, "Precondition Failed: page modified")
+        # ── end CAS conflict forcing ──
 
         if if_match:
             try:

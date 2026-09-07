@@ -388,7 +388,6 @@ def register_pages(subparsers, client_factory):
     # --- delete ---
     p_delete = subparsers.add_parser("delete", help="Delete a page")
     p_delete.add_argument("page", help="Page id")
-    _add_output_args(p_delete)
     p_delete.set_defaults(func=lambda args: cmd_delete(client_factory(), args))
 
     # --- edit ---
@@ -431,7 +430,6 @@ def register_pages(subparsers, client_factory):
     p_move = subparsers.add_parser("move", help="Move/rename a page")
     p_move.add_argument("src", help="Source page id")
     p_move.add_argument("dst", help="Destination page id")
-    _add_output_args(p_move)
     p_move.set_defaults(func=lambda args: cmd_move(client_factory(), args))
 
     # --- links ---

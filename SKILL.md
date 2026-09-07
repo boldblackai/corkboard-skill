@@ -50,11 +50,11 @@ python3 script/corkboard.py <command> [options]
 | `get` | `<page>` | Fetch a page by id (JSON to stdout). |
 | `put` | `<page>` [`--file PATH` \| `--text TEXT`] [`--sum MSG`] | Create or replace a page. Reads body from `--file`, `--text`, or stdin. Uses CAS (If-Match) to avoid overwriting concurrent edits. |
 | `append` | `<page>` [`--file PATH` \| `--text TEXT`] [`--sum MSG`] | Append text to the end of a page. |
-| `delete` | `<page>` [`--sum MSG`] | Delete a page. |
+| `delete` | `<page>` | Delete a page. |
 | `edit` | `<page>` (`--old OLD --new NEW` …) [`--edits FILE`] [`--sum MSG`] | Surgical edit. Fetch-mutate-put_cas flow: each `--old` must match exactly once in the current body; pairs are applied sequentially. Use `--edits` for a tab-separated file (`old\tnew` per line). |
 | `insert` | `<page>` (`--under H` \| `--after L` \| `--before L`) [`--file PATH` \| `--text TEXT`] [`--sum MSG`] | Insert content at an anchor position. `--under` places content under a Markdown heading (ends at next same-or-higher-level heading). `--after` and `--before` target an exact line. The anchor must match exactly one line. |
 | `find` | `<page>` `<pattern>` [`-E`] [`-i`] | Search a page body. `-E` enables extended regex; `-i` makes the search case-insensitive. |
-| `move` | `<src>` `<dst>` [`--sum MSG`] | Move/rename a page. Server-side: backlinks are rewritten and history is preserved. |
+| `move` | `<src>` `<dst>` | Move/rename a page. Server-side: backlinks are rewritten and history is preserved. |
 | `links` | `<page>` | List outgoing wiki-links from a page. |
 | `backlinks` | `<page>` | List pages that link to this page. |
 | `revisions` | `<page>` | List revision history for a page. |
@@ -75,7 +75,7 @@ python3 script/corkboard.py <command> [options]
 
 | Command | Arguments | Description |
 |---------|-----------|-------------|
-| `media-upload` | `<file>` `<ns>` `<name>` [`--no-overwrite`] | Upload a file. Tries raw binary PUT first; falls back to base64 JSON on content-type rejection. |
+| `media-upload` | `<file>` `<ns>` `<name>` | Upload a file. Tries raw binary PUT first; falls back to base64 JSON on content-type rejection. |
 | `media-get` | `<id>` [`-o PATH`] | Download a media file. Writes to `-o` path or stdout. |
 | `media-list` | [`--ns NS`] | List media files, optionally filtered by namespace. |
 | `media-delete` | `<id>` | Delete a media file. |
@@ -87,7 +87,7 @@ python3 script/corkboard.py <command> [options]
 
 | Flag | Applies to | Meaning |
 |------|-----------|---------|
-| `--sum MSG` | `put`, `append`, `delete`, `edit`, `insert`, `move` | Edit summary recorded in the page revision. |
+| `--sum MSG` | `put`, `append`, `edit`, `insert` | Edit summary recorded in the page revision. |
 | `--file PATH` / `-F` | `put`, `append`, `insert` | Read body from a file (mutually exclusive with `--text`). |
 | `--text TEXT` / `-T` | `put`, `append`, `insert` | Inline body text (mutually exclusive with `--file`). |
 

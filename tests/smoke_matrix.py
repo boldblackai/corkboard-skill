@@ -189,7 +189,7 @@ def main():
 
     _run(["find", "start", "Welcome"], expect_contains='"count"')
 
-    _run(["move", "sandbox", "playground", "--sum", "rename"],
+    _run(["move", "sandbox", "playground"],
          expect_contains='"id": "playground"')
 
     _run(["links", "start"], expect_contains="sandbox")
@@ -197,8 +197,19 @@ def main():
     _run(["revisions", "start"], expect_contains='"revisions"')
     _run(["revision-show", "start", "1"], expect_contains='"revision"')
 
-    _run(["delete", "playground", "--sum", "cleanup"],
+    _run(["delete", "playground"],
          expect_contains='"deleted"')
+
+    # CAS conflict rows (mock forces 412s via sentinel page ids)
+    _run(["put", "cas-retry-success", "--text", "line one\nline two\n", "--sum", "create"],
+         expect_contains='"id": "cas-retry-success"')
+    _run(["edit", "cas-retry-success", "--old", "line one", "--new", "line ONE", "--sum", "cas edit"],
+         expect_contains="CONCURRENT-ADDITION")
+
+    _run(["put", "cas-double-conflict", "--text", "hello\n", "--sum", "create"],
+         expect_contains='"id": "cas-double-conflict"')
+    _run_expect_fail(["edit", "cas-double-conflict", "--old", "hello", "--new", "HELLO"],
+                      expect_contains="CONFLICT")
 
     # ==================================================================
     # Collections — S2 module (cb_collections.py)
