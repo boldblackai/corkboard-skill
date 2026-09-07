@@ -9,7 +9,6 @@ wires them into an argparse subparser.
 from __future__ import annotations
 
 import sys
-from collections import defaultdict
 
 
 # ---------------------------------------------------------------------------
@@ -143,8 +142,8 @@ def _count_subpages(children):
 def handle_semantic_error(status, body, *, connection_error=False):
     """Handle semantic-search error responses.
 
-    - 403 / 503 → exit 0 with a user-friendly message (plan-gated or
-      embedding service down).
+    - 402 (plan-gated) / 403 / 503 (embedding service down) → exit 0 with a
+      user-friendly message (semantic search simply is not available).
     - ConnectionError → exit 1.
     - Any other error → raise SemanticUnavailable so the caller can decide.
 
@@ -154,7 +153,7 @@ def handle_semantic_error(status, body, *, connection_error=False):
     if connection_error:
         raise SystemExit(1)
 
-    if status in (403, 503):
+    if status in (402, 403, 503):
         print(
             "semantic search unavailable (plan-gated or embedding service down)",
             file=sys.stderr,
@@ -303,7 +302,6 @@ def cmd_semantic(client, args):
         if status is not None:
             handle_semantic_error(status, body)
         # Check if it's a connection error
-        import errno
         if isinstance(e, OSError):
             handle_semantic_error(None, None, connection_error=True)
         raise

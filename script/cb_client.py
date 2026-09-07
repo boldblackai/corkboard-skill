@@ -25,6 +25,19 @@ class CorkboardError(Exception):
         return base
 
 
+def build_body_payload(body, summary=None):
+    """Build a page body write payload, including ``summary`` when provided.
+
+    Shared by the CAS PUT path (put_cas) and the append path so the ``--sum``
+    edit summary reaches the server's ``summary`` field (verified in
+    PageController.validatePage + append, which accept an optional summary).
+    """
+    payload = {"body": body}
+    if summary is not None:
+        payload["summary"] = summary
+    return payload
+
+
 class CorkboardClient:
     """HTTP client for Corkboard API v1.
 
@@ -90,10 +103,16 @@ class CorkboardClient:
                 body=body,
             )
 
-    def request(self, method, path, data=None, headers=None, params=None):
-        """Make an HTTP request to the API. Returns parsed JSON or raw body."""
+    def request(self, method, path, data=None, headers=None, params=None, raw=False):
+        """Make an HTTP request to the API.
+
+        Returns parsed JSON by default. When ``raw=True``, returns the raw
+        response body bytes (used for binary downloads such as media-get).
+        """
         url = self._build_url(path, params)
         status, body = self._make_request(method, url, data=data, headers=headers)
+        if raw:
+            return body
         try:
             return json.loads(body)
         except (json.JSONDecodeError, ValueError):
@@ -123,47 +142,68 @@ class CorkboardClient:
         """Fetch a page by id. Returns the full page JSON (incl. body + revision)."""
         return self.get(f"pages/{page_id}")
 
-    def put_cas(self, page_id, body, revision=None):
-        """PUT a page with optimistic concurrency.
+    def put_cas(self, page_id, body_or_mutate, revision=None, summary=None):
+        """PUT a page with optimistic concurrency (CAS).
 
-        If revision is given, sends If-Match: \"<revision>\".
-        On HTTP 412 (conflict), re-fetches the page once, re-applies the
-        mutation via a caller-supplied callback, and retries once.
-        A second 412 raises CorkboardError with CONFLICT.
+        ``body_or_mutate`` is either:
 
-        The caller is responsible for applying the mutation; this method
-        handles the CAS retry loop.
+          - a ``str``: the full replacement body (replacement semantics — a
+            concurrent change to the page does not alter the intent to replace
+            the whole body), or
+          - a callable ``f(fresh_body) -> str``: a mutation to (re-)apply to
+            the current page body (used by edit/insert).
+
+        On HTTP 412 the page is re-fetched ONCE and the write is re-applied
+        against the fresh body:
+
+          - callable: ``new_body = body_or_mutate(fresh_body)``
+          - string:   the same body is re-sent (full replacement)
+
+        A second 412 raises ``CorkboardError`` (status 412) with a CONFLICT
+        message. ``summary``, when set, is sent as the page's edit summary.
         """
-        return self._put_cas_internal(page_id, body, revision, attempt=1)
+        return self._put_cas_internal(page_id, body_or_mutate, revision, summary, attempt=1)
 
-    def _put_cas_internal(self, page_id, body, revision, attempt):
+    def _put_cas_internal(self, page_id, body_or_mutate, revision, summary, attempt):
         headers = {}
+        body = body_or_mutate
+
+        # A mutation callback needs the current body to derive the write;
+        # fetch it now (and its revision, when the caller did not pin one).
+        if callable(body_or_mutate):
+            page = self.get_page(page_id)
+            fresh_body = page.get("body", "")
+            if revision is None:
+                revision = page.get("revision") or page.get("body_revision")
+            body = body_or_mutate(fresh_body)
+
         if revision is not None:
             headers["If-Match"] = f'"{revision}"'
 
         try:
-            return self.request(
-                "PUT",
-                f"pages/{page_id}",
-                data={"body": body},
-                headers=headers,
-            )
+            return self._put_page(page_id, body, summary, headers)
         except CorkboardError as e:
-            if e.status == 412 and attempt == 1:
-                # Fetch the latest revision and retry once
-                page = self.get_page(page_id)
-                new_revision = page.get("revision") or page.get("body_revision")
-                headers["If-Match"] = f'"{new_revision}"'
-                return self.request(
-                    "PUT",
-                    f"pages/{page_id}",
-                    data={"body": body},
-                    headers=headers,
-                )
-            elif e.status == 412:
+            if e.status != 412:
+                raise
+            if attempt >= 2:
+                # Second 412 — a genuine conflict we will not resolve.
                 raise CorkboardError(
                     "CONFLICT: page was modified by another writer",
                     status=412,
                     body=e.body,
                 )
-            raise
+            # Re-fetch the page ONCE and re-apply against the fresh body.
+            page = self.get_page(page_id)
+            new_revision = page.get("revision") or page.get("body_revision")
+            fresh_body = page.get("body", "")
+            new_body = (
+                body_or_mutate(fresh_body) if callable(body_or_mutate) else body
+            )
+            return self._put_cas_internal(
+                page_id, new_body, new_revision, summary, attempt=attempt + 1
+            )
+
+    def _put_page(self, page_id, body, summary, headers):
+        """PUT a page body with the given CAS headers and summary."""
+        payload = build_body_payload(body, summary)
+        return self.request("PUT", f"pages/{page_id}", data=payload, headers=headers)

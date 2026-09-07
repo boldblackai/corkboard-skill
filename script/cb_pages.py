@@ -10,7 +10,7 @@ import json
 import re
 import sys
 
-from cb_client import CorkboardError
+from cb_client import CorkboardError, build_body_payload
 
 
 # ======================================================================
@@ -147,14 +147,6 @@ def resolve_anchor(body, anchor, mode, content):
     raise ValueError(f"unknown insert mode: {mode!r}")
 
 
-def should_retry_cas(status_code, attempt_count):
-    """Return True if a CAS PUT should be retried.
-
-    Retry exactly once on HTTP 412 (Precondition Failed).
-    """
-    return status_code == 412 and attempt_count == 1
-
-
 def is_page_not_found_error(exc):
     """Return True if the exception is a 404 page-not-found.
 
@@ -228,14 +220,17 @@ def cmd_put(client, args):
             revision = None
         else:
             raise
-    result = client.put_cas(args.page, body, revision=revision)
+    result = client.put_cas(
+        args.page, body, revision=revision, summary=getattr(args, "sum", None)
+    )
     _print_json(result)
 
 
 def cmd_append(client, args):
     """Append text to a page."""
     body = _read_input(args)
-    result = client.post(f"pages/{args.page}/append", data={"body": body})
+    payload = build_body_payload(body, getattr(args, "sum", None))
+    result = client.post(f"pages/{args.page}/append", data=payload)
     _print_json(result)
 
 
@@ -248,8 +243,9 @@ def cmd_delete(client, args):
 def cmd_edit(client, args):
     """Edit a page with one or more --old/--new replacements.
 
-    Uses the fetch-mutate-put_cas flow: gets the current body, applies
-    edits locally (with unique-match assertion), then PUTs with CAS.
+    Passes a mutation callback to put_cas so that, on a CAS conflict, the
+    edits are re-applied against the freshly re-fetched body (never against
+    the pre-conflict snapshot).
     """
     # Collect edits from --old/--new pairs and optionally --edits file
     edits = []
@@ -265,19 +261,18 @@ def cmd_edit(client, args):
     if not edits:
         raise CorkboardError("no edits provided (use --old/--new or --edits)")
 
-    page = client.get_page(args.page)
-    current_body = page.get("body", "")
-    new_body = apply_edits(current_body, edits)
+    def mutate(fresh_body):
+        return apply_edits(fresh_body, edits)
 
-    revision = page.get("revision") or page.get("body_revision")
-    result = client.put_cas(args.page, new_body, revision=revision)
+    result = client.put_cas(args.page, mutate, summary=getattr(args, "sum", None))
     _print_json(result)
 
 
 def cmd_insert(client, args):
     """Insert content at an anchor position.
 
-    Uses the fetch-mutate-put_cas flow.
+    Passes a mutation callback to put_cas so that, on a CAS conflict, the
+    insert is re-resolved against the freshly re-fetched body.
     """
     content = _read_input(args)
 
@@ -296,12 +291,10 @@ def cmd_insert(client, args):
     else:
         raise CorkboardError("one of --under, --after, or --before is required")
 
-    page = client.get_page(args.page)
-    current_body = page.get("body", "")
-    new_body = resolve_anchor(current_body, anchor, mode, content)
+    def mutate(fresh_body):
+        return resolve_anchor(fresh_body, anchor, mode, content)
 
-    revision = page.get("revision") or page.get("body_revision")
-    result = client.put_cas(args.page, new_body, revision=revision)
+    result = client.put_cas(args.page, mutate, summary=getattr(args, "sum", None))
     _print_json(result)
 
 
