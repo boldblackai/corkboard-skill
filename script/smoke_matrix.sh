@@ -264,12 +264,23 @@ $CLI media-get "$MEDIA_ID" -o /tmp/smoke-test-dl.png > /dev/null 2>&1
 cmp -s /tmp/smoke-test.png /tmp/smoke-test-dl.png && MG="OK" || MG="FAIL"
 check "  media-get byte round-trip" "cmp identical: $MG"
 
-# NOTE: media-usage calls GET /media/{id}/usage, but the server currently
-# shadows that route with GET /media/{id} (show) — the greedy {id} route is
-# registered first (routes/api.php media group). The CLI request is correct;
-# the 404 is a server-side route-ordering bug, out of this CLI's scope.
-row "media-usage" $CLI media-usage "$MEDIA_ID"
-check "  media-usage" "EXPECTED 404 (server route-shadowing bug, CLI correct)"
+# media-usage: create a page referencing the uploaded media, then verify
+# the usage response lists that page.
+PAGE_REF="$NS/smoke-media-ref"
+row "put (page referencing media)" $CLI put "$PAGE_REF" --text "image: $MEDIA_ID"
+USAGE_REF=$(raw $CLI media-usage "$MEDIA_ID") || true
+echo "$USAGE_REF" | grep -q "page_id" && UREF_OK="OK" || UREF_OK="FAIL"
+row "media-usage (referenced)" $CLI media-usage "$MEDIA_ID"
+check "  media-usage referenced" "page_id in used_by: $UREF_OK"
+
+# Unreferenced media returns empty used_by.
+UNREF_MEDIA="$NS/smoke-unref.png"
+$CLI media-upload /tmp/smoke-test.png "$NS" "smoke-unref.png" > /dev/null 2>&1
+USAGE_EMPTY=$(raw $CLI media-usage "$UNREF_MEDIA") || true
+echo "$USAGE_EMPTY" | grep -q "'used_by': \[\]" && UEMPTY_OK="OK" || UEMPTY_OK="FAIL"
+row "media-usage (unreferenced)" $CLI media-usage "$UNREF_MEDIA"
+check "  media-usage unreferenced" "used_by empty: $UEMPTY_OK"
+$CLI media-delete "$UNREF_MEDIA" > /dev/null 2>&1
 row "media-orphans" $CLI media-orphans
 
 NEW_MEDIA="$NS/smoke-test-moved.png"
