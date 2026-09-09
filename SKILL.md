@@ -19,15 +19,21 @@ script-and-shell workflows.
    (`cb_…`).  The token is bound to your workspace and used as a
    Bearer token.
 
-2. **Set environment variables** in your agent's shell profile:
+2. **Set the environment variable** in your agent's shell profile:
 
    ```bash
-   export CORKBOARD_URL="https://your-workspace.corkboard.wiki"
    export CORKBOARD_TOKEN="cb_your_token_here"
    ```
 
-   Both are required — the CLI will exit with a clear error if either
-   is missing.
+   `CORKBOARD_TOKEN` is required — the CLI will exit with a clear error
+   if it is missing.
+
+   For self-hosted or development instances, you may optionally set
+   `CORKBOARD_URL` to override the default (`https://corkboard.wiki`):
+
+   ```bash
+   export CORKBOARD_URL="https://your-instance.example.com"
+   ```
 
 3. **Install the skill.**  Clone or curl the skill into your agent's
    skills directory (see [README.md](README.md) for one-liners).
@@ -124,7 +130,6 @@ All mutating page commands use **optimistic concurrency (CAS):**
 3. PUT with `If-Match: "<revision>"`.
 4. On HTTP 412 (conflict), re-fetch once and retry.
 5. On a second 412, fail with `CONFLICT`.
-
 The `edit` command additionally enforces **unique-match assertions:**
 every `--old` string must appear exactly once in the page body.  This
 prevents accidental or ambiguous replacements.  The `insert` command

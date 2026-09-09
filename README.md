@@ -50,11 +50,20 @@ no post-install step.
 
 ## Configuration
 
-Set two environment variables in your agent's shell profile:
+Set the API token in your agent's shell profile:
 
 ```bash
-export CORKBOARD_URL="https://your-workspace.corkboard.wiki"
 export CORKBOARD_TOKEN="cb_your_api_token"
+```
+
+`CORKBOARD_TOKEN` is required — the CLI exits with a clear error if it
+is missing.
+
+For self-hosted or development instances, you may optionally override
+the default base URL:
+
+```bash
+export CORKBOARD_URL="https://your-instance.example.com"  # defaults to https://corkboard.wiki
 ```
 
 **Getting a token:** open your Corkboard workspace, go to **Settings →
