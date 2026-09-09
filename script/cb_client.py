@@ -1,6 +1,6 @@
 """Corkboard HTTP API v1 client — stdlib-only.
 
-Configuration from CORKBOARD_URL and CORKBOARD_TOKEN environment variables.
+Configuration from CORKBOARD_TOKEN (required) and CORKBOARD_URL (optional, defaults to https://corkboard.wiki) environment variables.
 """
 
 import json
@@ -41,16 +41,15 @@ def build_body_payload(body, summary=None):
 class CorkboardClient:
     """HTTP client for Corkboard API v1.
 
-    Reads CORKBOARD_URL and CORKBOARD_TOKEN from environment.
+    Reads CORKBOARD_TOKEN (required) and CORKBOARD_URL (optional, default
+    https://corkboard.wiki) from environment.
     """
 
     def __init__(self, base_url=None, token=None):
-        self._base_url = (base_url or os.environ.get("CORKBOARD_URL", "")).rstrip("/")
+        self._base_url = (
+            base_url or os.environ.get("CORKBOARD_URL", "https://corkboard.wiki")
+        ).rstrip("/")
         self._token = token or os.environ.get("CORKBOARD_TOKEN", "")
-        if not self._base_url:
-            raise CorkboardError(
-                "CORKBOARD_URL environment variable is not set"
-            )
         if not self._token:
             raise CorkboardError(
                 "CORKBOARD_TOKEN environment variable is not set"
