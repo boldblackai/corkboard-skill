@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # ------------------------------------------------------------------
+      # 1. Stdlib-only import audit
+      # ------------------------------------------------------------------
+      - name: Import audit (stdlib only)
+        run: |
+          python3 -c "
+          import ast, sys, os
+
+          STDLIB = sys.stdlib_module_names if hasattr(sys, 'stdlib_module_names') else set()
+
+          # Collect project-local module names (files in script/ and tests/)
+          LOCAL = set()
+          for d in ('script', 'tests'):
+              if os.path.isdir(d):
+                  for f in os.listdir(d):
+                      if f.endswith('.py'):
+                          LOCAL.add(f[:-3])
+
+          def check_file(path):
+              with open(path) as f:
+                  tree = ast.parse(f.read(), filename=path)
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      for alias in node.names:
+                          mod = alias.name.split('.')[0]
+                          if mod not in STDLIB and mod not in LOCAL:
+                              print(f'NON-STDLIB import in {path}: {mod}')
+                              sys.exit(1)
+                  elif isinstance(node, ast.ImportFrom):
+                      if node.module is not None:
+                          mod = node.module.split('.')[0]
+                          if mod not in STDLIB and mod not in LOCAL:
+                              print(f'NON-STDLIB import in {path}: {mod}')
+                              sys.exit(1)
+
+          for root, dirs, files in os.walk('.'):
+              dirs[:] = [d for d in dirs if d not in ('.git', '__pycache__', '.github')]
+              for f in files:
+                  if f.endswith('.py'):
+                      check_file(os.path.join(root, f))
+          print('Import audit: all imports are stdlib')
+          "
+
+      # ------------------------------------------------------------------
+      # 2. Unit tests
+      # ------------------------------------------------------------------
+      - name: Unit tests
+        run: |
+          python3 tests/test_pages_logic.py
+          python3 tests/test_collections_logic.py
+
+      # ------------------------------------------------------------------
+      # 3. Mock-server command matrix
+      # ------------------------------------------------------------------
+      - name: Mock server smoke matrix
+        run: |
+          python3 tests/mock_server.py &
+          MOCK_PID=$!
+          sleep 1
+          python3 tests/smoke_matrix.py
+          SMOKE_EXIT=$?
+          kill $MOCK_PID 2>/dev/null
+          exit $SMOKE_EXIT
