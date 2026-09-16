@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # smoke_matrix.sh — live integration smoke test against a Corkboard server.
-# Reads CORKBOARD_URL and CORKBOARD_TOKEN from the environment.
+# Reads CORKBOARD_URL, CORKBOARD_TOKEN and CORKBOARD_WORKSPACE from the
+# environment.
+#
+# Content requests use the workspace-scoped grammar
+#   {CORKBOARD_URL}/api/v1/o/{org_slug}/{ws_slug}/{path}
+# (the old unscoped /api/v1/{path} grammar is dead — it returns 404).
+# The workspace scope follows the client's resolution order:
+# CORKBOARD_WORKSPACE when set, else the first accessible pair from
+# GET /api/v1/me.
 # Prints a table: command | exit | key-output
 set -euo pipefail
 
@@ -8,6 +16,37 @@ CLI="python3 script/corkboard.py"
 NS="smoke"
 : "${CORKBOARD_URL:?CORKBOARD_URL must be set}"
 : "${CORKBOARD_TOKEN:?CORKBOARD_TOKEN must be set}"
+
+# ------------------------------------------------------------------
+# Workspace scope for the raw transport probe in section 3.  The CLI
+# resolves its own scope; this mirrors the client's order
+# (CORKBOARD_WORKSPACE > first accessible pair from /me).
+# ------------------------------------------------------------------
+resolve_workspace() {
+    python3 - <<'PYEOF'
+import sys
+sys.path.insert(0, "script")
+from cb_client import CorkboardClient, CorkboardError
+try:
+    org, ws = CorkboardClient().workspace
+except CorkboardError as exc:
+    sys.stderr.write(f"{exc}\n")
+    sys.exit(1)
+print(f"{org}/{ws}")
+PYEOF
+}
+
+if ! WS_SPEC="$(resolve_workspace)"; then
+    echo "FATAL: cannot resolve the workspace scope." >&2
+    echo "Set CORKBOARD_WORKSPACE=org_slug/ws_slug (see: $CLI me)." >&2
+    exit 1
+fi
+ORG="${WS_SPEC%%/*}"
+WS="${WS_SPEC##*/}"
+[[ -n "$ORG" && -n "$WS" && "$WS" != "$WS_SPEC" ]] || {
+    echo "FATAL: bad workspace spec '$WS_SPEC' (want org_slug/ws_slug)." >&2
+    exit 1
+}
 
 # header
 printf "%-40s | %4s | %s\n" "command" "exit" "key-output"
@@ -79,10 +118,18 @@ beta
 gamma"
 
 # Concurrent writer bypasses the CLI and bumps the revision + changes the body.
-curl -s -X PUT "$CORKBOARD_URL/api/v1/pages/$PAGE_CAS" \
+# Raw curl on purpose: this row probes the transport itself, so the
+# workspace-scoped URL is built by hand from ORG/WS resolved above.
+CAS_HTTP="$(curl -s -o /dev/null -w '%{http_code}' -X PUT \
+    "$CORKBOARD_URL/api/v1/o/$ORG/$WS/pages/$PAGE_CAS" \
     -H "Authorization: Bearer $CORKBOARD_TOKEN" \
     -H "Content-Type: application/json" \
-    -d '{"body":"alpha\nCONCURRENT\nbeta\ngamma"}' > /dev/null
+    -d '{"body":"alpha\nCONCURRENT\nbeta\ngamma"}')"
+if [[ "$CAS_HTTP" != "200" ]]; then
+    echo "FATAL: concurrent-writer PUT returned HTTP $CAS_HTTP" >&2
+    echo "  PUT $CORKBOARD_URL/api/v1/o/$ORG/$WS/pages/$PAGE_CAS" >&2
+    exit 1
+fi
 
 # CLI edit must re-fetch the concurrent body and preserve the writer's text.
 row "edit after concurrent write" $CLI edit "$PAGE_CAS" --old "beta" --new "BETA"

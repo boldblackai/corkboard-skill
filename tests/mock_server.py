@@ -12,6 +12,11 @@ Models the server grammar live since corkboard-app 21b7552:
 Includes a 412 CAS conflict once-then-success scenario and a 403 on
 semantic search.
 
+An org/ws pair the token cannot reach answers 404, not 403 (SEC-108
+no-existence-leak): on live, ```ResolveWorkspace``` returns
+``{"error": "Workspace not found."}`` with status 404, and 403 is
+reserved for scope-denied writes (``api.scope:*``).
+
 Tokens are user-scoped: one token reaches every accessible workspace.
 The mock's token ``test-token`` sees ``acme/main`` and ``beta/docs``;
 any token starting with ``empty`` sees none (for the no-accessible-
@@ -84,11 +89,17 @@ def me_payload(token):
             "ws": {"id": index, "slug": ws_slug, "name": ws_slug.title()},
         })
     first = workspaces[0] if workspaces else {}
+    # Live shape (PlanContext::toResponseArray): an object, not a bare
+    # string.  No primary organization (no accessible workspace) → null,
+    # matching MeController's `$plan?->toResponseArray()`.
+    plan = (
+        {"name": "team", "trial_days_remaining": None} if workspaces else None
+    )
     return {
         "user": {"id": 1, "name": "Test User", "email": "test@example.com"},
         "organization": first.get("org"),
         "workspace": first.get("ws"),
-        "plan": "team",
+        "plan": plan,
         "workspaces": workspaces,
     }
 
@@ -222,10 +233,10 @@ class MockHandler(BaseHTTPRequestHandler):
             return self._handle_me()
 
         # Workspace scope: the token must reach this org/ws pair.
+        # Live answers 404 here (SEC-108 no-existence-leak) — an unknown and
+        # an inaccessible pair are indistinguishable to the caller.
         if (org, ws) not in accessible_workspaces(self._get_token()):
-            return self._send_error(
-                403, f"Workspace {org}/{ws} not accessible with this token"
-            )
+            return self._send_error(404, "Workspace not found.")
         return self._ws_dispatch(method, rest, qs)
 
     # ------------------------------------------------------------------
@@ -254,10 +265,10 @@ class MockHandler(BaseHTTPRequestHandler):
 
         if method == "GET":
             # Media sub-routes first (they share /media prefix with pages)
-            m = re.match(r"^/media/(.+)/usage$", p)
+            m = re.match(r"^/media/(.*)/usage$", p)
             if m:
                 return self._handle_media_usage(m.group(1))
-            m = re.match(r"^/media/(.+)$", p)
+            m = re.match(r"^/media/(.*)$", p)
             if m:
                 return self._handle_media_get(m.group(1))
             if p == "/media":
@@ -271,51 +282,54 @@ class MockHandler(BaseHTTPRequestHandler):
             if p == "/pages":
                 return self._handle_pages_list(qs)
 
-            # Individual page sub-routes
-            m = re.match(r"^/pages/([^/]+)/links$", p)
+            # Individual page sub-routes.  Page ids are greedy on live
+            # (`->where('id', '.*')`), so ``ns/page`` ids are legal: the
+            # sub-routes must be matched before the show route, and the id
+            # group must span slashes.
+            m = re.match(r"^/pages/(.*)/links$", p)
             if m:
                 return self._handle_links(m.group(1))
-            m = re.match(r"^/pages/([^/]+)/backlinks$", p)
+            m = re.match(r"^/pages/(.*)/backlinks$", p)
             if m:
                 return self._handle_backlinks(m.group(1))
-            m = re.match(r"^/pages/([^/]+)/revisions/([^/]+)$", p)
+            m = re.match(r"^/pages/(.*)/revisions/([^/]+)$", p)
             if m:
                 return self._handle_revision_show(m.group(1), m.group(2))
-            m = re.match(r"^/pages/([^/]+)/revisions$", p)
+            m = re.match(r"^/pages/(.*)/revisions$", p)
             if m:
                 return self._handle_revisions(m.group(1))
-            m = re.match(r"^/pages/([^/]+)/find$", p)
+            m = re.match(r"^/pages/(.*)/find$", p)
             if m:
                 return self._handle_find(m.group(1), qs)
-            m = re.match(r"^/pages/([^/]+)$", p)
+            m = re.match(r"^/pages/(.*)$", p)
             if m:
                 return self._handle_get_page(m.group(1))
 
         elif method == "PUT":
-            m = re.match(r"^/media/(.+)$", p)
+            m = re.match(r"^/media/(.*)$", p)
             if m:
                 return self._handle_media_put(m.group(1))
 
-            m = re.match(r"^/pages/(.+)$", p)
+            m = re.match(r"^/pages/(.*)$", p)
             if m:
                 return self._handle_put_page(m.group(1))
 
         elif method == "POST":
-            m = re.match(r"^/pages/([^/]+)/append$", p)
+            m = re.match(r"^/pages/(.*)/append$", p)
             if m:
                 return self._handle_append(m.group(1))
-            m = re.match(r"^/pages/([^/]+)/move$", p)
+            m = re.match(r"^/pages/(.*)/move$", p)
             if m:
                 return self._handle_move(m.group(1))
-            m = re.match(r"^/media/(.+)/move$", p)
+            m = re.match(r"^/media/(.*)/move$", p)
             if m:
                 return self._handle_media_move(m.group(1))
 
         elif method == "DELETE":
-            m = re.match(r"^/pages/([^/]+)$", p)
+            m = re.match(r"^/pages/(.*)$", p)
             if m:
                 return self._handle_delete_page(m.group(1))
-            m = re.match(r"^/media/(.+)$", p)
+            m = re.match(r"^/media/(.*)$", p)
             if m:
                 return self._handle_media_delete(m.group(1))
 

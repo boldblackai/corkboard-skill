@@ -178,9 +178,10 @@ def main():
     _run(["--workspace", "beta/docs", "get", "start"],
          expect_contains='"id": "start"', workspace="acme/main")
 
-    # explicit --workspace the token cannot reach → 403
+    # explicit --workspace the token cannot reach → 404 (SEC-108: an
+    # inaccessible pair is indistinguishable from an unknown one)
     _run_expect_fail(["--workspace", "nope/nope", "get", "start"],
-                     expect_contains="403")
+                     expect_contains="404")
 
     # token with no accessible workspaces → actionable error
     _run_expect_fail(["get", "start"], expect_contains="no accessible workspace",

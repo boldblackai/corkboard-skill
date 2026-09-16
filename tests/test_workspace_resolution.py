@@ -159,6 +159,48 @@ def test_me_endpoint_reachable_without_workspace():
            f"first ws slug wrong: {payload['workspaces'][0]!r}")
 
 
+def test_me_payload_plan_is_an_object():
+    """Shape pin: ``plan`` is ``{name, trial_days_remaining}`` (PlanContext).
+
+    Not a bare plan-name string.  With no accessible workspace there is no
+    primary organization, so ``plan`` is null — same as
+    ``MeController``'s ``$plan?->toResponseArray()``.
+    """
+    with _workspace_env(None):
+        payload = _client().me()
+    plan = payload.get("plan")
+    _check(isinstance(plan, dict), f"plan should be an object, got {plan!r}")
+    if isinstance(plan, dict):
+        _check(plan.get("name") == "team", f"plan name wrong: {plan!r}")
+        _check("trial_days_remaining" in plan,
+               f"plan lacks trial_days_remaining: {plan!r}")
+
+    empty = _client(token="test-token-empty").me()
+    _check(empty.get("plan") is None,
+           f"plan should be null with no workspace, got {empty.get('plan')!r}")
+
+
+def test_slash_page_ids_resolve_under_workspace_scope():
+    """Greedy ``{id}`` routes: ``ns/page`` ids are legal on live.
+
+    Live declares ``->where('id', '.*')`` on every page/media id route, so
+    a namespaced id spans the slash.  Both the show route and its
+    sub-routes must keep the full id.
+    """
+    client = _client(workspace="acme/main")
+    client.put("pages/ns/page", data={"body": "slash id body"})
+
+    page = client.get_page("ns/page")
+    _check(page.get("id") == "ns/page", f"slash id round-trip failed: {page!r}")
+
+    status, _ = _raw_get("/api/v1/o/acme/main/pages/ns/page")
+    _check(status == 200, f"raw slash-id GET returned {status}, expected 200")
+
+    links = client.get("pages/ns/page/links")
+    _check(links.get("page") == "ns/page",
+           f"slash-id sub-route lost the id: {links!r}")
+
+
 # ---------------------------------------------------------------------------
 # Resolution order: explicit arg > env > me-derived
 # ---------------------------------------------------------------------------
@@ -212,12 +254,18 @@ def test_no_accessible_workspace_raises():
                    f"error should say no accessible workspace, got: {err}")
 
 
-def test_explicit_pair_the_token_cannot_reach_is_forbidden():
+def test_explicit_pair_the_token_cannot_reach_is_not_found():
+    """An inaccessible pair answers 404, not 403 (SEC-108 no-existence-leak).
+
+    403 is reserved for scope-denied writes (``api.scope:*``); the
+    workspace resolver makes an unknown and an inaccessible pair
+    indistinguishable.
+    """
     client = _client(workspace="nope/nope")
     err = _raises(CorkboardError, client.get_page, "start")
     _check(err is not None, "inaccessible workspace did not raise")
     if err is not None:
-        _check(err.status == 403, f"expected 403, got {err.status}")
+        _check(err.status == 404, f"expected 404, got {err.status}")
 
 
 # ---------------------------------------------------------------------------
