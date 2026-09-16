@@ -71,6 +71,7 @@ jobs:
         run: |
           python3 tests/test_pages_logic.py
           python3 tests/test_collections_logic.py
+          python3 tests/test_workspace_resolution.py
 
       # ------------------------------------------------------------------
       # 3. Mock-server command matrix

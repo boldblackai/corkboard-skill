@@ -1,6 +1,18 @@
 """Corkboard HTTP API v1 client — stdlib-only.
 
-Configuration from CORKBOARD_TOKEN (required) and CORKBOARD_URL (optional, defaults to https://corkboard.wiki) environment variables.
+Configuration:
+
+* ``CORKBOARD_TOKEN`` — required; a user-scoped personal access token
+  (``cb_…``).  One token reaches every workspace the user can access.
+* ``CORKBOARD_URL`` — optional; base URL, defaults to https://corkboard.wiki
+* ``CORKBOARD_WORKSPACE`` — optional; default workspace as ``org_slug/ws_slug``
+
+Content requests are workspace-scoped:
+
+    {base}/api/v1/o/{org_slug}/{ws_slug}/{path}
+
+The ``me`` endpoint stays unscoped (``{base}/api/v1/me``): it is the
+discovery call that lists the token's accessible ``org/ws`` pairs.
 """
 
 import json
@@ -25,6 +37,54 @@ class CorkboardError(Exception):
         return base
 
 
+def parse_workspace_spec(spec):
+    """Parse an ``org_slug/ws_slug`` workspace spec into ``(org, ws)``.
+
+    Leading/trailing slashes are tolerated.  Returns ``None`` for an empty
+    or missing spec.  Raises ``CorkboardError`` for anything that is not
+    exactly two non-empty segments.
+    """
+    if spec is None:
+        return None
+    spec = spec.strip()
+    if not spec:
+        return None
+    parts = [part for part in spec.strip("/").split("/")]
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise CorkboardError(
+            f"invalid workspace {spec!r}: expected 'org_slug/ws_slug'"
+        )
+    return (parts[0], parts[1])
+
+
+def workspace_pairs_from_me(payload):
+    """Extract the accessible ``(org_slug, ws_slug)`` pairs from a /me payload.
+
+    The server shape (corkboard-app 21b7552) is::
+
+        {"workspaces": [{"org": {"slug": …}, "ws": {"slug": …}}, …]}
+
+    Malformed entries are skipped rather than raising, so a partial payload
+    degrades to "no accessible workspace" instead of a crash.
+    """
+    pairs = []
+    if not isinstance(payload, dict):
+        return pairs
+    entries = payload.get("workspaces")
+    if not isinstance(entries, list):
+        return pairs
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        org = entry.get("org")
+        ws = entry.get("ws")
+        org_slug = org.get("slug") if isinstance(org, dict) else None
+        ws_slug = ws.get("slug") if isinstance(ws, dict) else None
+        if org_slug and ws_slug:
+            pairs.append((org_slug, ws_slug))
+    return pairs
+
+
 def build_body_payload(body, summary=None):
     """Build a page body write payload, including ``summary`` when provided.
 
@@ -43,9 +103,18 @@ class CorkboardClient:
 
     Reads CORKBOARD_TOKEN (required) and CORKBOARD_URL (optional, default
     https://corkboard.wiki) from environment.
+
+    The workspace is resolved once, in this order:
+
+    1. the ``workspace`` constructor argument (``"org_slug/ws_slug"``)
+    2. the ``CORKBOARD_WORKSPACE`` environment variable (same form)
+    3. the first accessible pair from ``GET /api/v1/me``
+
+    An empty (3) result raises ``CorkboardError``.  The resolved pair is
+    cached on the instance, so ``me`` is called at most once per client.
     """
 
-    def __init__(self, base_url=None, token=None):
+    def __init__(self, base_url=None, token=None, workspace=None):
         self._base_url = (
             base_url or os.environ.get("CORKBOARD_URL", "https://corkboard.wiki")
         ).rstrip("/")
@@ -54,15 +123,56 @@ class CorkboardClient:
             raise CorkboardError(
                 "CORKBOARD_TOKEN environment variable is not set"
             )
+        # Resolution order step 1 (explicit arg) and step 2 (env).
+        if workspace is None:
+            workspace = os.environ.get("CORKBOARD_WORKSPACE")
+        self._workspace = parse_workspace_spec(workspace)
+        self._me_payload = None
 
     @property
     def base_url(self):
         return self._base_url
 
-    def _build_url(self, path, params=None):
-        """Build a full API URL from a path and optional query params."""
+    @property
+    def workspace(self):
+        """The resolved ``(org_slug, ws_slug)`` pair (me-derived and cached)."""
+        if self._workspace is None:
+            self._workspace = self._resolve_default_workspace()
+        return self._workspace
+
+    def _resolve_default_workspace(self):
+        """Resolution order step 3: first accessible pair from /api/v1/me."""
+        pairs = workspace_pairs_from_me(self.me())
+        if not pairs:
+            raise CorkboardError(
+                "no accessible workspace for this token: "
+                "check the token's scopes or set CORKBOARD_WORKSPACE=org_slug/ws_slug"
+            )
+        return pairs[0]
+
+    def me(self, refresh=False):
+        """GET /api/v1/me — unscoped identity + accessible workspaces.
+
+        Cached per instance; pass ``refresh=True`` to re-fetch.
+        """
+        if self._me_payload is None or refresh:
+            self._me_payload = self.request("GET", "me", unscoped=True)
+        return self._me_payload
+
+    def _build_url(self, path, params=None, unscoped=False):
+        """Build a full API URL from a path and optional query params.
+
+        Content paths are workspace-scoped (``o/{org}/{ws}/…``); ``unscoped``
+        is reserved for service-level endpoints such as ``me`` and the root.
+        """
         path = path.lstrip("/")
-        url = f"{self._base_url}/api/v1/{path}"
+        if unscoped:
+            url = f"{self._base_url}/api/v1/{path}"
+        else:
+            org, ws = self.workspace
+            org = urllib.parse.quote(org, safe="")
+            ws = urllib.parse.quote(ws, safe="")
+            url = f"{self._base_url}/api/v1/o/{org}/{ws}/{path}"
         if params:
             url = f"{url}?{urllib.parse.urlencode(params)}"
         return url
@@ -102,13 +212,16 @@ class CorkboardClient:
                 body=body,
             )
 
-    def request(self, method, path, data=None, headers=None, params=None, raw=False):
+    def request(self, method, path, data=None, headers=None, params=None,
+                raw=False, unscoped=False):
         """Make an HTTP request to the API.
 
         Returns parsed JSON by default. When ``raw=True``, returns the raw
         response body bytes (used for binary downloads such as media-get).
+        ``unscoped=True`` bypasses the workspace base-path (only ``me`` and
+        the service root are unscoped).
         """
-        url = self._build_url(path, params)
+        url = self._build_url(path, params, unscoped=unscoped)
         status, body = self._make_request(method, url, data=data, headers=headers)
         if raw:
             return body
@@ -117,9 +230,9 @@ class CorkboardClient:
         except (json.JSONDecodeError, ValueError):
             return body
 
-    def get(self, path, params=None):
+    def get(self, path, params=None, unscoped=False):
         """GET request to the API. Returns parsed JSON."""
-        return self.request("GET", path, params=params)
+        return self.request("GET", path, params=params, unscoped=unscoped)
 
     def post(self, path, data=None, params=None):
         """POST request to the API. Returns parsed JSON."""

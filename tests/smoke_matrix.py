@@ -11,6 +11,10 @@ Usage:
 Environment set by this script:
     CORKBOARD_URL=http://127.0.0.1:PORT
     CORKBOARD_TOKEN=test-token
+    CORKBOARD_WORKSPACE=acme/main  (rows can unset or override it)
+
+The mock models the workspace-scoped grammar: content lives under
+/api/v1/o/{org}/{ws}/…, discovery at the unscoped /api/v1/me.
 """
 
 from __future__ import annotations
@@ -39,11 +43,15 @@ ENTRYPOINT = ""
 
 
 def _run(cmd, expected_exit=0, expect_contains=None,
-         skip_reason=None):
+         skip_reason=None, workspace="acme/main", token="test-token",
+         unset_workspace=False):
     """Run a CLI command and assert exit code / output patterns.
 
-    If skip_reason is set, the test is recorded as skipped regardless of
-    outcome (used for commands broken by upstream S1/S2 bugs).
+    ``workspace`` sets CORKBOARD_WORKSPACE (default ``acme/main``);
+    ``unset_workspace=True`` runs without it so the client falls back to
+    the me-derived default.  If skip_reason is set, the test is recorded
+    as skipped regardless of outcome (used for commands broken by
+    upstream S1/S2 bugs).
     """
     global _ran, _failures, _skipped
 
@@ -57,7 +65,10 @@ def _run(cmd, expected_exit=0, expect_contains=None,
 
     env = os.environ.copy()
     env["CORKBOARD_URL"] = MOCK_URL
-    env["CORKBOARD_TOKEN"] = "test-token"
+    env["CORKBOARD_TOKEN"] = token
+    env.pop("CORKBOARD_WORKSPACE", None)
+    if workspace is not None and not unset_workspace:
+        env["CORKBOARD_WORKSPACE"] = workspace
 
     full_cmd = ["python3", ENTRYPOINT] + cmd
     result = subprocess.run(full_cmd, capture_output=True, text=True, env=env, timeout=15)
@@ -85,9 +96,9 @@ def _run(cmd, expected_exit=0, expect_contains=None,
     return ok
 
 
-def _run_expect_fail(cmd, expect_contains=None):
+def _run_expect_fail(cmd, expect_contains=None, **kwargs):
     """Run a command expected to fail (non-zero exit)."""
-    _run(cmd, expected_exit=1, expect_contains=expect_contains)
+    _run(cmd, expected_exit=1, expect_contains=expect_contains, **kwargs)
 
 
 def _run_media_get_roundtrip(media_id, out_path, expected_bytes):
@@ -99,6 +110,7 @@ def _run_media_get_roundtrip(media_id, out_path, expected_bytes):
     env = os.environ.copy()
     env["CORKBOARD_URL"] = MOCK_URL
     env["CORKBOARD_TOKEN"] = "test-token"
+    env["CORKBOARD_WORKSPACE"] = "acme/main"
 
     full_cmd = ["python3", ENTRYPOINT, "media-get", media_id, "-o", out_path]
     result = subprocess.run(full_cmd, capture_output=True, text=True, env=env, timeout=15)
@@ -148,6 +160,31 @@ def main():
     print(f"Smoke matrix against {MOCK_URL}")
     print(f"Entrypoint: {ENTRYPOINT}")
     print()
+
+    # ==================================================================
+    # Discovery — me + workspace resolution
+    # ==================================================================
+
+    print("--- Discovery (me) ---")
+
+    _run(["me"], expect_contains="acme/main")
+    _run(["me"], expect_contains="Test User")
+    _run(["me", "--json"], expect_contains='"workspaces"')
+
+    # me-derived default: no workspace env and no --workspace flag
+    _run(["get", "start"], expect_contains='"id": "start"', unset_workspace=True)
+
+    # explicit --workspace beats the CORKBOARD_WORKSPACE env value
+    _run(["--workspace", "beta/docs", "get", "start"],
+         expect_contains='"id": "start"', workspace="acme/main")
+
+    # explicit --workspace the token cannot reach → 403
+    _run_expect_fail(["--workspace", "nope/nope", "get", "start"],
+                     expect_contains="403")
+
+    # token with no accessible workspaces → actionable error
+    _run_expect_fail(["get", "start"], expect_contains="no accessible workspace",
+                     token="test-token-empty", unset_workspace=True)
 
     # ==================================================================
     # Page commands — S1 module (cb_pages.py)

@@ -384,7 +384,8 @@ class _ScriptedClient(CorkboardClient):
     def get_page(self, page_id):
         return self._gets.pop(0)
 
-    def request(self, method, path, data=None, headers=None, params=None, raw=False):
+    def request(self, method, path, data=None, headers=None, params=None,
+                raw=False, unscoped=False):
         if method != "PUT":
             raise AssertionError(f"unexpected request {method} {path}")
         self.puts.append((data, headers))

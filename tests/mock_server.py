@@ -1,9 +1,21 @@
 #!/usr/bin/env python3
 """Corkboard API v1 mock server — stdlib http.server.
 
-Implements every endpoint the CLI touches with canned JSON responses.
+Models the server grammar live since corkboard-app 21b7552:
+
+* ``GET /api/v1/me`` — unscoped discovery: identity + accessible
+  ``workspaces: [{org: {slug…}, ws: {slug…}}]`` pairs.
+* content endpoints — workspace-scoped only:
+  ``/api/v1/o/{org}/{ws}/…``
+* OLD unscoped content paths (``/api/v1/pages/…``) → 404.
+
 Includes a 412 CAS conflict once-then-success scenario and a 403 on
 semantic search.
+
+Tokens are user-scoped: one token reaches every accessible workspace.
+The mock's token ``test-token`` sees ``acme/main`` and ``beta/docs``;
+any token starting with ``empty`` sees none (for the no-accessible-
+workspace error path).
 
 Usage:
     python3 tests/mock_server.py [--port PORT] [--host HOST]
@@ -26,7 +38,6 @@ from urllib.parse import urlparse, parse_qs
 
 _pages: dict[str, dict] = {}
 _media: dict[str, bytes] = {}
-_next_revision = 1
 
 # Pre-seed a page for tests
 _pages["start"] = {
@@ -45,6 +56,42 @@ _pages["sandbox"] = {
 }
 
 _service_root = {"service": "corkboard", "version": "0.1.0", "api_version": "v1", "status": "ok"}
+
+# ---------------------------------------------------------------------------
+# Token → accessible workspaces (user-scoped PAT model)
+# ---------------------------------------------------------------------------
+
+ACCESSIBLE_WORKSPACES = [("acme", "main"), ("beta", "docs")]
+
+
+def accessible_workspaces(token):
+    """Return the [(org_slug, ws_slug)] pairs this token can reach.
+
+    A token containing ``empty`` reaches nothing — used to exercise the
+    no-accessible-workspace error path.
+    """
+    if "empty" in (token or ""):
+        return []
+    return list(ACCESSIBLE_WORKSPACES)
+
+
+def me_payload(token):
+    """Build the /api/v1/me response body for a token."""
+    workspaces = []
+    for index, (org_slug, ws_slug) in enumerate(accessible_workspaces(token), start=1):
+        workspaces.append({
+            "org": {"id": index, "slug": org_slug, "name": org_slug.title()},
+            "ws": {"id": index, "slug": ws_slug, "name": ws_slug.title()},
+        })
+    first = workspaces[0] if workspaces else {}
+    return {
+        "user": {"id": 1, "name": "Test User", "email": "test@example.com"},
+        "organization": first.get("org"),
+        "workspace": first.get("ws"),
+        "plan": "team",
+        "workspaces": workspaces,
+    }
+
 
 # ---------------------------------------------------------------------------
 # CAS conflict forcing — deterministic 412s for smoke-matrix testing.
@@ -77,7 +124,10 @@ _CONCURRENT_MARKER = "CONCURRENT-ADDITION\n"
 # ---------------------------------------------------------------------------
 
 class MockHandler(BaseHTTPRequestHandler):
-    """Handle Corkboard API v1 requests."""
+    """Handle Corkboard API v1 requests (workspace-scoped grammar)."""
+
+    # Number of /api/v1/me calls served — used by the caching tests.
+    me_calls = 0
 
     def log_message(self, fmt, *args):
         pass
@@ -127,126 +177,157 @@ class MockHandler(BaseHTTPRequestHandler):
         return True
 
     # ------------------------------------------------------------------
-    # Path normalization
+    # Path parsing
     # ------------------------------------------------------------------
 
-    def _norm(self, raw_path):
-        """Normalize request path by stripping ALL leading /api/v1 prefixes.
+    def _route(self):
+        """Parse the request path.
 
-        The client's _build_url adds /api/v1/ automatically.  Some modules
-        pass fully-qualified /api/v1/... paths, producing a double prefix.
-        We strip repeatedly to handle any depth of prefix stacking.
+        Returns ``(scope, org, ws, rest, query)`` where scope is one of:
+
+        * ``root``    — ``/api/v1`` (service root, unscoped)
+        * ``me``      — ``/api/v1/me`` (unscoped discovery)
+        * ``ws``      — ``/api/v1/o/{org}/{ws}/…`` (org + ws + rest filled)
+        * ``invalid`` — anything else, incl. the OLD unscoped content paths
         """
-        p = raw_path.rstrip("/")
-        while p.startswith("/api/v1/"):
-            p = p[7:]
-        while p.startswith("/api/v1"):
-            p = p[7:]
-        return p or "/"
+        parsed = urlparse(self.path)
+        p = parsed.path.rstrip("/") or "/"
+        qs = parse_qs(parsed.query)
+
+        if p == "/api/v1":
+            return ("root", None, None, "/", qs)
+        if p == "/api/v1/me":
+            return ("me", None, None, "/me", qs)
+        m = re.match(r"^/api/v1/o/([^/]+)/([^/]+)(.*)$", p)
+        if m:
+            rest = m.group(3) or "/"
+            if not rest.startswith("/"):
+                rest = "/" + rest
+            return ("ws", m.group(1), m.group(2), rest, qs)
+        return ("invalid", None, None, p, qs)
+
+    def _dispatch(self, method):
+        scope, org, ws, rest, qs = self._route()
+
+        if scope == "root":
+            return self._send_json(_service_root)
+        if scope == "invalid":
+            # OLD unscoped content paths land here → 404 (dead grammar).
+            return self._send_error(404, "Not found")
+        if not self._check_auth():
+            return
+        if scope == "me":
+            if method != "GET":
+                return self._send_error(405, "Method not allowed")
+            return self._handle_me()
+
+        # Workspace scope: the token must reach this org/ws pair.
+        if (org, ws) not in accessible_workspaces(self._get_token()):
+            return self._send_error(
+                403, f"Workspace {org}/{ws} not accessible with this token"
+            )
+        return self._ws_dispatch(method, rest, qs)
 
     # ------------------------------------------------------------------
-    # Routing
+    # HTTP verbs
     # ------------------------------------------------------------------
 
     def do_GET(self):
-        parsed = urlparse(self.path)
-        p = self._norm(parsed.path)
-        qs = parse_qs(parsed.query)
+        self._dispatch("GET")
 
+    def do_PUT(self):
+        self._dispatch("PUT")
+
+    def do_POST(self):
+        self._dispatch("POST")
+
+    def do_DELETE(self):
+        self._dispatch("DELETE")
+
+    # ------------------------------------------------------------------
+    # Workspace-scoped routing (rest of the path after /o/{org}/{ws})
+    # ------------------------------------------------------------------
+
+    def _ws_dispatch(self, method, p, qs):
         if p == "/":
             return self._send_json(_service_root)
 
-        # Media sub-routes first (they share /media prefix with pages)
-        m = re.match(r"^/media/(.+)/usage$", p)
-        if m:
-            return self._handle_media_usage(m.group(1))
-        m = re.match(r"^/media/(.+)$", p)
-        if m:
-            return self._handle_media_get(m.group(1))
-        if p == "/media":
-            return self._handle_media_list(qs)
+        if method == "GET":
+            # Media sub-routes first (they share /media prefix with pages)
+            m = re.match(r"^/media/(.+)/usage$", p)
+            if m:
+                return self._handle_media_usage(m.group(1))
+            m = re.match(r"^/media/(.+)$", p)
+            if m:
+                return self._handle_media_get(m.group(1))
+            if p == "/media":
+                return self._handle_media_list(qs)
 
-        # Semantic search
-        if p == "/pages/semantic":
-            return self._handle_semantic(qs)
+            # Semantic search
+            if p == "/pages/semantic":
+                return self._handle_semantic(qs)
 
-        # Pages collection
-        if p == "/pages":
-            return self._handle_pages_list(qs)
+            # Pages collection
+            if p == "/pages":
+                return self._handle_pages_list(qs)
 
-        # Individual page sub-routes
-        m = re.match(r"^/pages/([^/]+)/links$", p)
-        if m:
-            return self._handle_links(m.group(1))
-        m = re.match(r"^/pages/([^/]+)/backlinks$", p)
-        if m:
-            return self._handle_backlinks(m.group(1))
-        m = re.match(r"^/pages/([^/]+)/revisions/([^/]+)$", p)
-        if m:
-            return self._handle_revision_show(m.group(1), m.group(2))
-        m = re.match(r"^/pages/([^/]+)/revisions$", p)
-        if m:
-            return self._handle_revisions(m.group(1))
-        m = re.match(r"^/pages/([^/]+)/find$", p)
-        if m:
-            return self._handle_find(m.group(1), qs)
-        m = re.match(r"^/pages/([^/]+)$", p)
-        if m:
-            return self._handle_get_page(m.group(1))
+            # Individual page sub-routes
+            m = re.match(r"^/pages/([^/]+)/links$", p)
+            if m:
+                return self._handle_links(m.group(1))
+            m = re.match(r"^/pages/([^/]+)/backlinks$", p)
+            if m:
+                return self._handle_backlinks(m.group(1))
+            m = re.match(r"^/pages/([^/]+)/revisions/([^/]+)$", p)
+            if m:
+                return self._handle_revision_show(m.group(1), m.group(2))
+            m = re.match(r"^/pages/([^/]+)/revisions$", p)
+            if m:
+                return self._handle_revisions(m.group(1))
+            m = re.match(r"^/pages/([^/]+)/find$", p)
+            if m:
+                return self._handle_find(m.group(1), qs)
+            m = re.match(r"^/pages/([^/]+)$", p)
+            if m:
+                return self._handle_get_page(m.group(1))
 
-        self._send_error(404, "Not found")
+        elif method == "PUT":
+            m = re.match(r"^/media/(.+)$", p)
+            if m:
+                return self._handle_media_put(m.group(1))
 
-    def do_PUT(self):
-        parsed = urlparse(self.path)
-        p = self._norm(parsed.path)
+            m = re.match(r"^/pages/(.+)$", p)
+            if m:
+                return self._handle_put_page(m.group(1))
 
-        if not self._check_auth():
-            return
+        elif method == "POST":
+            m = re.match(r"^/pages/([^/]+)/append$", p)
+            if m:
+                return self._handle_append(m.group(1))
+            m = re.match(r"^/pages/([^/]+)/move$", p)
+            if m:
+                return self._handle_move(m.group(1))
+            m = re.match(r"^/media/(.+)/move$", p)
+            if m:
+                return self._handle_media_move(m.group(1))
 
-        m = re.match(r"^/media/(.+)$", p)
-        if m:
-            return self._handle_media_put(m.group(1))
-
-        m = re.match(r"^/pages/(.+)$", p)
-        if m:
-            return self._handle_put_page(m.group(1))
-
-        self._send_error(404, "Not found")
-
-    def do_POST(self):
-        parsed = urlparse(self.path)
-        p = self._norm(parsed.path)
-
-        if not self._check_auth():
-            return
-
-        m = re.match(r"^/pages/([^/]+)/append$", p)
-        if m:
-            return self._handle_append(m.group(1))
-        m = re.match(r"^/pages/([^/]+)/move$", p)
-        if m:
-            return self._handle_move(m.group(1))
-        m = re.match(r"^/media/(.+)/move$", p)
-        if m:
-            return self._handle_media_move(m.group(1))
+        elif method == "DELETE":
+            m = re.match(r"^/pages/([^/]+)$", p)
+            if m:
+                return self._handle_delete_page(m.group(1))
+            m = re.match(r"^/media/(.+)$", p)
+            if m:
+                return self._handle_media_delete(m.group(1))
 
         self._send_error(404, "Not found")
 
-    def do_DELETE(self):
-        parsed = urlparse(self.path)
-        p = self._norm(parsed.path)
+    # ------------------------------------------------------------------
+    # Identity / discovery
+    # ------------------------------------------------------------------
 
-        if not self._check_auth():
-            return
-
-        m = re.match(r"^/pages/([^/]+)$", p)
-        if m:
-            return self._handle_delete_page(m.group(1))
-        m = re.match(r"^/media/(.+)$", p)
-        if m:
-            return self._handle_media_delete(m.group(1))
-
-        self._send_error(404, "Not found")
+    def _handle_me(self):
+        MockHandler.me_calls += 1
+        return self._send_json(me_payload(self._get_token()))
 
     # ------------------------------------------------------------------
     # Page handlers

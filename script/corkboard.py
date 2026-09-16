@@ -16,14 +16,23 @@ from cb_client import CorkboardClient, CorkboardError
 from cb_pages import register_pages
 from cb_collections import register_collections
 from cb_media import register_media
+from cb_me import register_me
+
+
+# Set from --workspace in main() before any command runs.  Keeps the
+# client_factory contract (zero-argument callable) unchanged for the
+# command modules.
+_WORKSPACE_OVERRIDE = None
 
 
 def _mk_client():
-    """Factory: build a CorkboardClient from environment."""
-    return CorkboardClient()
+    """Factory: build a CorkboardClient from environment (+ --workspace)."""
+    return CorkboardClient(workspace=_WORKSPACE_OVERRIDE)
 
 
 def main(argv=None):
+    global _WORKSPACE_OVERRIDE
+
     if argv is None:
         argv = sys.argv[1:]
 
@@ -36,6 +45,14 @@ def main(argv=None):
         action="store_true",
         help="Show the service root response and exit",
     )
+    parser.add_argument(
+        "--workspace",
+        default=None,
+        metavar="ORG/WS",
+        help=("Workspace to target as 'org_slug/ws_slug' "
+              "(default: $CORKBOARD_WORKSPACE, else the first accessible "
+              "workspace from 'me')"),
+    )
     subparsers = parser.add_subparsers(
         dest="command",
         title="commands",
@@ -45,14 +62,18 @@ def main(argv=None):
     register_pages(subparsers, _mk_client)
     register_collections(subparsers, _mk_client)
     register_media(subparsers, _mk_client)
+    register_me(subparsers, _mk_client)
 
     args = parser.parse_args(argv)
+
+    # Explicit CLI workspace wins over CORKBOARD_WORKSPACE (see _mk_client).
+    _WORKSPACE_OVERRIDE = args.workspace
 
     # --version flag
     if args.version:
         try:
             client = _mk_client()
-            root = client.get("")
+            root = client.get("", unscoped=True)
             import json
             print(json.dumps(root, indent=2))
         except CorkboardError as e:
