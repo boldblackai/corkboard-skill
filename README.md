@@ -42,6 +42,7 @@ curl -sSL https://raw.githubusercontent.com/boldblackai/corkboard-skill/main/scr
 curl -sSL https://raw.githubusercontent.com/boldblackai/corkboard-skill/main/script/cb_pages.py -o ~/agent-skills/corkboard/script/cb_pages.py
 curl -sSL https://raw.githubusercontent.com/boldblackai/corkboard-skill/main/script/cb_collections.py -o ~/agent-skills/corkboard/script/cb_collections.py
 curl -sSL https://raw.githubusercontent.com/boldblackai/corkboard-skill/main/script/cb_media.py -o ~/agent-skills/corkboard/script/cb_media.py
+curl -sSL https://raw.githubusercontent.com/boldblackai/corkboard-skill/main/script/cb_me.py -o ~/agent-skills/corkboard/script/cb_me.py
 ```
 
 The skill uses a **plain-directory layout:** `SKILL.md` at the root,
@@ -57,7 +58,11 @@ export CORKBOARD_TOKEN="cb_your_api_token"
 ```
 
 `CORKBOARD_TOKEN` is required — the CLI exits with a clear error if it
-is missing.
+is missing.  The token is **user-scoped**: one token reaches every
+workspace you can access.
+
+Content endpoints are **workspace-scoped**, so the CLI also needs an
+`org_slug/ws_slug` pair — see *Workspaces* below.
 
 For self-hosted or development instances, you may optionally override
 the default base URL:
@@ -66,13 +71,48 @@ the default base URL:
 export CORKBOARD_URL="https://your-instance.example.com"  # defaults to https://corkboard.wiki
 ```
 
-**Getting a token:** open your Corkboard workspace, go to **Settings →
-API tokens**, and create a personal access token.  The token is a
-`cb_…` string bound to your workspace — never hardcode it in files.
+**Getting a token:** open Corkboard, go to **Settings → API tokens**,
+and create a personal access token.  The token is a `cb_…` string — never
+hardcode it in files.
+
+## Workspaces
+
+The API is workspace-scoped:
+
+```
+content:  {CORKBOARD_URL}/api/v1/o/{org_slug}/{ws_slug}/{path}
+me:       {CORKBOARD_URL}/api/v1/me          (unscoped)
+```
+
+The old unscoped content grammar (`/api/v1/{path}`) returns **404**
+(BREAKING since corkboard-app #214).
+
+Run `me` to list your accessible workspaces:
+
+```bash
+python3 script/corkboard.py me
+```
+
+The CLI picks a workspace in this order:
+
+1. `--workspace ORG/WS` (before the command name),
+2. `CORKBOARD_WORKSPACE` (optional):
+
+   ```bash
+   export CORKBOARD_WORKSPACE="acme/main"
+   ```
+
+3. the first accessible workspace from `me`, resolved once per client.
+
+If none of the three yields a workspace, the CLI exits with
+`no accessible workspace for this token`.
 
 ## Quick Start
 
 ```bash
+# Discover identity + accessible workspaces
+python3 script/corkboard.py me
+
 # List top-level pages
 python3 script/corkboard.py list
 

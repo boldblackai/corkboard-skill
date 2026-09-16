@@ -1,7 +1,7 @@
 ---
 name: corkboard
 description: Use when the user wants to read/write Corkboard wikis via the HTTP API.
-version: "1.0.0"
+version: "2.0.0"
 license: MIT
 ---
 
@@ -12,14 +12,30 @@ A stdlib-only Python CLI that reads and writes Corkboard wikis over the
 (Hermes, Claude Code, Codex, …) — an alternative to MCP for
 script-and-shell workflows.
 
+## Breaking change (v2)
+
+Since corkboard-app #214 the API is **workspace-scoped**:
+
+```
+content:  {CORKBOARD_URL}/api/v1/o/{org_slug}/{ws_slug}/{path}
+me:       {CORKBOARD_URL}/api/v1/me          (unscoped)
+```
+
+The old unscoped content grammar (`/api/v1/{path}`) returns **404**.
+This release re-points every content request to the new base path.
+If your commands began failing with 404 after the server rollout,
+upgrade the skill.  PATs are **user-scoped** now: one token reaches
+every workspace the user can access (power = token scopes ∩ the live
+effective role in that workspace).
+
 ## Setup
 
-1. **Get an API token.**  Open your Corkboard workspace, go to
-   **Settings → API tokens**, and create a personal access token
-   (`cb_…`).  The token is bound to your workspace and used as a
-   Bearer token.
+1. **Get an API token.**  Open Corkboard, go to **Settings → API
+   tokens**, and create a personal access token (`cb_…`).  The token is
+   **user-scoped** — it is not bound to a single workspace — and is used
+   as a Bearer token.
 
-2. **Set the environment variable** in your agent's shell profile:
+2. **Set the environment variables** in your agent's shell profile:
 
    ```bash
    export CORKBOARD_TOKEN="cb_your_token_here"
@@ -27,6 +43,23 @@ script-and-shell workflows.
 
    `CORKBOARD_TOKEN` is required — the CLI will exit with a clear error
    if it is missing.
+
+   Content endpoints need an `org_slug/ws_slug` pair.  The CLI resolves
+   one in this order:
+
+   1. the `--workspace ORG/WS` flag,
+   2. the optional `CORKBOARD_WORKSPACE` environment variable:
+
+      ```bash
+      export CORKBOARD_WORKSPACE="acme/main"
+      ```
+
+   3. the first accessible workspace from `me` (below), resolved once
+      and cached per client.
+
+   Run `me` to discover your slugs.  When none of the three yields a
+   workspace, the CLI exits with
+   `no accessible workspace for this token`.
 
    For self-hosted or development instances, you may optionally set
    `CORKBOARD_URL` to override the default (`https://corkboard.wiki`):
@@ -48,6 +81,19 @@ Invoke every command through the entrypoint:
 ```
 python3 script/corkboard.py <command> [options]
 ```
+
+### Discovery
+
+`me` is the only command that is **not** workspace-scoped.  It is the
+discovery tool: it lists the token's identity and every accessible
+`org/ws` pair, and it backs the default workspace resolution.
+
+| Command | Arguments | Description |
+|---------|-----------|-------------|
+| `me` | [`--json`] | Show the token's user, plan, and accessible `org/ws` workspaces. Use it to find the slugs for `--workspace` / `CORKBOARD_WORKSPACE`. `--json` prints the raw `/me` payload. |
+
+Every other command targets the workspace base path
+`{CORKBOARD_URL}/api/v1/o/{org_slug}/{ws_slug}/…`.
 
 ### Pages
 
@@ -93,6 +139,7 @@ python3 script/corkboard.py <command> [options]
 
 | Flag | Applies to | Meaning |
 |------|-----------|---------|
+| `--workspace ORG/WS` | every command (before the command name) | Workspace to target. Wins over `CORKBOARD_WORKSPACE` and the `me`-derived default. |
 | `--sum MSG` | `put`, `append`, `edit`, `insert` | Edit summary recorded in the page revision. |
 | `--file PATH` / `-F` | `put`, `append`, `insert` | Read body from a file (mutually exclusive with `--text`). |
 | `--text TEXT` / `-T` | `put`, `append`, `insert` | Inline body text (mutually exclusive with `--file`). |
